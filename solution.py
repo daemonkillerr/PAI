@@ -5,15 +5,18 @@ import numpy as np
 from sklearn.gaussian_process import GaussianProcessRegressor
 import matplotlib.pyplot as plt
 from matplotlib import cm
-
+from sklearn.kernel_approximation import Nystroem
+from sklearn.cluster import KMeans
 
 # Set `EXTENDED_EVALUATION` to `True` in order to visualize your predictions.
 EXTENDED_EVALUATION = False
 EVALUATION_GRID_POINTS = 300  # Number of grid points used in extended evaluation
 
 # Cost function constants
-COST_W_UNDERPREDICT = 50.0
+THRESHOLD = 35.5
 COST_W_NORMAL = 1.0
+COST_W_OVERPREDICT = 5.0
+COST_W_THRESHOLD = 20.0
 
 
 class Model(object):
@@ -29,8 +32,13 @@ class Model(object):
         We already provide a random number generator for reproducibility.
         """
         self.rng = np.random.default_rng(seed=0)
-        kernel = DotProduct() + WhiteKernel()
-        self.gpr = GaussianProcessRegressor(kernel=kernel, random_state=0)
+        # Optimal kernel as per CV
+        self.kernel = Matern(1.0, (1e-5, 1e4), nu=2.5) + WhiteKernel(1.0, (1e-5, 1e2))
+        self.gp = GaussianProcessRegressor(kernel=self.kernel,
+                                           normalize_y=True,
+                                           n_restarts_optimizer=5,
+                                           copy_X_train=False,
+                                           random_state=22)
         # TODO: Add custom initialization for your model here if necessary
 
     def make_predictions(self, test_x_2D: np.ndarray, test_x_AREA: np.ndarray) -> typing.Tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -44,14 +52,10 @@ class Model(object):
         """
 
         # TODO: Use your GP to estimate the posterior mean and stddev for each city_area here
-        gp_mean = np.zeros(test_x_2D.shape[0], dtype=float)
-        gp_std = np.zeros(test_x_2D.shape[0], dtype=float)
+        gp_mean, gp_std = self.gp.predict(test_x_2D, return_std=True)
+        pred = predict_cost_align(gp_mean, gp_std)
 
-        # TODO: Use the GP posterior to form your predictions here
-        gp_mean, gp_std = self.gpr.predict(test_x_2D, return_std=True)
-        predictions = gp_mean
-
-        return predictions, gp_mean, gp_std
+        return pred, gp_mean, gp_std
 
     def fitting_model(self, train_y: np.ndarray,train_x_2D: np.ndarray):
         """
@@ -59,33 +63,75 @@ class Model(object):
         :param train_x_2D: Training features as a 2d NumPy float array of shape (NUM_SAMPLES, 2)
         :param train_y: Training pollution concentrations as a 1d NumPy float array of shape (NUM_SAMPLES,)
         """
-        self.gpr.fit(train_x_2D, train_y)
+        
+        train_x, train_y = samp_reduce(train_x_2D, train_y)
+        print('Sample size reduced: %s / %s' %(train_x.shape, train_y.shape))
 
-        # TODO: Fit your model here
-        pass
+        self.gp.fit(train_x, train_y)
+        print('Kernel:', self.gp.kernel_)
+
+def samp_reduce(train_x, train_y, k=5000):
+    """
+    Reduces the sample size via k-means clustering
+    to deal with GP inference complexity.
+
+    :k: desired sample size
+    """
+
+    cluster = KMeans(n_clusters=k)
+    cluster.fit(train_x, train_y)
+
+    train_y_new = np.empty((k, ))
+    for i in range(0, k):
+        idx = (cluster.labels_ == i)
+        train_y_new[i] = train_y[idx].mean()
+    train_x_new = cluster.cluster_centers_
+    return train_x_new, train_y_new
 
 # You don't have to change this function
-def cost_function(ground_truth: np.ndarray, predictions: np.ndarray, AREA_idxs: np.ndarray) -> float:
+def cost_function(y_true: np.ndarray, y_predicted: np.ndarray) -> float:
     """
     Calculates the cost of a set of predictions.
 
-    :param ground_truth: Ground truth pollution levels as a 1d NumPy float array
-    :param predictions: Predicted pollution levels as a 1d NumPy float array
-    :param AREA_idxs: city_area info for every sample in a form of a bool array (NUM_SAMPLES,)
-    :return: Total cost of all predictions as a single float
+    :returns: mean asymmetric MSE cost
     """
-    assert ground_truth.ndim == 1 and predictions.ndim == 1 and ground_truth.shape == predictions.shape
+    assert y_true.ndim == 1 and y_predicted.ndim == 1 and y_true.shape == y_predicted.shape
 
     # Unweighted cost
-    cost = (ground_truth - predictions) ** 2
-    weights = np.ones_like(cost) * COST_W_NORMAL
+    cost = (y_true - y_predicted) ** 2
+    weights = np.zeros_like(cost)
 
-    # Case i): underprediction
-    mask = (predictions < ground_truth) & [bool(AREA_idx) for AREA_idx in AREA_idxs]
-    weights[mask] = COST_W_UNDERPREDICT
+    # Case 1: overprediction
+    mask_1 = y_predicted > y_true
+    weights[mask_1] = COST_W_OVERPREDICT
 
-    # Weigh the cost and return the average
+    # Case 2: true is above threshold, prediction below
+    mask_2 = (y_true >= THRESHOLD) & (y_predicted < THRESHOLD)
+    weights[mask_2] = COST_W_THRESHOLD
+
+    # Case 3: else
+    mask_3 = ~(mask_1 | mask_2)
+    weights[mask_3] = COST_W_NORMAL
+
     return np.mean(cost * weights)
+
+def predict_cost_align(gp_mean: np.ndarray, gp_std:np.ndarray) -> np.ndarray:
+    """
+    Custom prediction assignment based on asymmetric cost.
+    If threshold value within one std of pred mean, then pred = threshold.
+    Else attempt to underpredict by subtracting a fraction of the std.
+
+    :returns: predictions based on above rule
+    """
+    interval = np.column_stack((gp_mean - 1*gp_std, gp_mean + 1*gp_std))
+    thresh_mask = (interval[:,0] <= THRESHOLD) & (THRESHOLD <= interval[:,1])
+
+    pred = np.zeros(len(gp_mean))
+    pred[thresh_mask] = THRESHOLD
+    pred[~thresh_mask] = gp_mean[~thresh_mask] - 0.75*gp_std[~thresh_mask]
+    print('Prediction aligned for asymmetric cost')
+
+    return pred
 
 
 # You don't have to change this function
@@ -181,6 +227,10 @@ def extract_city_area_information(train_x: np.ndarray, test_x: np.ndarray) -> ty
     test_x_AREA = np.zeros((test_x.shape[0],), dtype=bool)
 
     #TODO: Extract the city_area information from the training and test features
+    train_x_2D = train_x[:,:2]
+    train_x_AREA = train_x[:,2]
+    test_x_2D = test_x[:,:2]
+    test_x_AREA = test_x[:,2]
 
     assert train_x_2D.shape[0] == train_x_AREA.shape[0] and test_x_2D.shape[0] == test_x_AREA.shape[0]
     assert train_x_2D.shape[1] == 2 and test_x_2D.shape[1] == 2
