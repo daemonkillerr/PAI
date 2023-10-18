@@ -32,19 +32,38 @@ class Model(object):
         """
         self.rng = np.random.default_rng(seed=0)
         # Optimal kernel as per CV
-        # self.kernel = Matern(1.0, (1e-5, 1e4), nu=2.5) + WhiteKernel(1.0, (1e-5, 1e2))
-        # self.gp = GaussianProcessRegressor(
-        #    kernel=self.kernel,
-        #    normalize_y=True,
-        #    n_restarts_optimizer=5,
-        #    copy_X_train=False,
-        #    random_state=22,
-        # )
-        self.nystroem_feature_map = Nystroem(
-           gamma=0.2, random_state=1, n_components=1000, n_jobs=-1
+        self.kernel = Matern(1.0, (1e-5, 1e4), nu=2.5) + WhiteKernel(1.0, (1e-5, 1e2))
+        self.gp = GaussianProcessRegressor(
+            kernel=self.kernel,
+            normalize_y=True,
+            n_restarts_optimizer=2,
+            copy_X_train=False,
+            random_state=22,
         )
-        self.lc = svm.LinearSVR(dual='auto')
+        # self.nystroem_feature_map = Nystroem(
+        #    gamma=0.2, random_state=1, n_components=1000, n_jobs=-1
+        # )
+        # self.lc = svm.LinearSVR()
         # TODO: Add custom initialization for your model here if necessary
+
+    def predict_cost_align(
+        self, gp_mean: np.ndarray, gp_std: np.ndarray, AREA_idxs: np.ndarray
+    ) -> np.ndarray:
+        """
+        Custom prediction assignment based on asymmetric cost.
+        If threshold value within one std of pred mean, then pred = threshold.
+        Else attempt to underpredict by subtracting a fraction of the std.
+
+        :returns: predictions based on above rule
+        """
+        thresh_mask = AREA_idxs
+
+        pred = np.zeros(len(gp_mean))
+        pred[thresh_mask] = gp_mean[thresh_mask]
+        pred[~thresh_mask] = gp_mean[~thresh_mask] + 0.75 * gp_std[~thresh_mask]
+        print("Prediction aligned for asymmetric cost")
+
+        return pred
 
     def make_predictions(
         self, test_x_2D: np.ndarray, test_x_AREA: np.ndarray
@@ -59,15 +78,14 @@ class Model(object):
         """
 
         # TODO: Use your GP to estimate the posterior mean and stddev for each city_area here
-        #gp_mean, gp_std = self.gp.predict(test_x_2D, return_std=True)
+        gp_mean, gp_std = self.gp.predict(test_x_2D, return_std=True)
 
-        #pred = gp_mean.copy()
-        # gp_std[test_x_AREA.astype(bool)] = gp_mean[test_x_AREA.astype(bool)]
+        pred = self.predict_cost_align(gp_mean, gp_std, test_x_AREA.astype(bool))
         # print(gp_std)
 
-        #return pred, gp_mean, gp_std
+        return pred, gp_mean, gp_std
 
-        return self.lc.predict(self.nystroem_feature_map.transform(test_x_2D)),[],[]
+        # return self.lc.predict(self.nystroem_feature_map.transform(test_x_2D)),[],[]
 
     def fitting_model(self, train_y: np.ndarray, train_x_2D: np.ndarray):
         """
@@ -76,15 +94,15 @@ class Model(object):
         :param train_y: Training pollution concentrations as a 1d NumPy float array of shape (NUM_SAMPLES,)
         """
 
-        #train_x_2D, train_y = samp_reduce(train_x_2D, train_y)
-        #print("Sample size reduced: %s / %s" % (train_x_2D.shape, train_y.shape))
+        train_x_2D, train_y = samp_reduce(train_x_2D, train_y)
+        print("Sample size reduced: %s / %s" % (train_x_2D.shape, train_y.shape))
 
-        #self.gp.fit(train_x, train_y)
-        #print("Kernel:", self.gp.kernel_)
-        self.lc.fit(self.nystroem_feature_map.fit_transform(train_x_2D), train_y)
+        self.gp.fit(train_x_2D, train_y)
+        print("Kernel:", self.gp.kernel_)
+        # self.lc.fit(self.nystroem_feature_map.fit_transform(train_x_2D), train_y)
 
 
-def samp_reduce(train_x, train_y, k=2000):
+def samp_reduce(train_x, train_y, k=5000):
     """
     Reduces the sample size via k-means clustering
     to deal with GP inference complexity.
@@ -120,7 +138,7 @@ def cost_function(
         and predictions.ndim == 1
         and ground_truth.shape == predictions.shape
     )
-    
+
     # Unweighted cost
     cost = (ground_truth - predictions) ** 2
     weights = np.ones_like(cost) * COST_W_NORMAL
