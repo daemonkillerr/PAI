@@ -75,7 +75,7 @@ class Model(object):
         self.gp_models = []
 
         # Training
-        self.iterations = 100
+        self.iterations = 10
         self.num_clusters = 10
         
         # self.nystroem_feature_map = Nystroem(
@@ -121,8 +121,8 @@ class Model(object):
         # Preprocessing - normalization
         features_test = (test_x_2D - self.features_mean) / self.features_std
 
-        means = np.zeros(len(self.gp_models), len(features_test))
-        stds = np.zeros(len(self.gp_models), len(features_test))
+        means = np.zeros((len(self.gp_models), len(features_test)))
+        stds = np.zeros((len(self.gp_models), len(features_test)))
         counter = 0
         for model in self.gp_models:
             model.eval()
@@ -132,8 +132,8 @@ class Model(object):
             stds[counter,:] = gp_std
             counter = counter + 1
 
-        gp_mean = np.zeros(len(means.shape[1]))
-        gp_std = np.zeros(len(means.shape[1]))
+        gp_mean = np.zeros(means.shape[1])
+        gp_std = np.zeros(means.shape[1])
         centers = self.km_model.predict(features_test)
         for k in range(means.shape[1]):
             gp_mean[k] = means[centers[k], k]
