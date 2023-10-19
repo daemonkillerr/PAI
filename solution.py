@@ -121,23 +121,23 @@ class Model(object):
         # Preprocessing - normalization
         features_test = (test_x_2D - self.features_mean) / self.features_std
 
-        means = []
-        stds = []
+        means = np.zeros(len(self.gp_models), len(features_test))
+        stds = np.zeros(len(self.gp_models), len(features_test))
+        counter = 0
         for model in self.gp_models:
             model.eval()
             gp_results = model(torch.tensor(features_test).float())
             gp_mean, gp_std = gp_results.mean.detach().numpy(), gp_results.variance.detach().numpy()
-            means.append(gp_mean) 
-            stds.append(gp_std)
-        means = np.array(means)
-        stds = np.array(stds)
+            means[counter,:] = gp_mean
+            stds[counter,:] = gp_std
+            counter = counter + 1
 
-        gp_mean = []
-        gp_std = []
+        gp_mean = np.zeros(len(means.shape[1]))
+        gp_std = np.zeros(len(means.shape[1]))
         centers = self.km_model.predict(features_test)
         for k in range(means.shape[1]):
-            gp_mean.append(means[centers[k], k])
-            gp_std.append(stds[centers[k], k])
+            gp_mean[k] = means[centers[k], k]
+            gp_std[k] =stds[centers[k], k]
         gp_mean  = np.array(gp_mean)
         gp_std = np.array(gp_std)
         
@@ -166,6 +166,7 @@ class Model(object):
         self.kmeans_centers = self.km_model.cluster_centers_
 
         for cluster in range(self.num_clusters):
+            print('training on cluster', cluster+1,'/', self.num_clusters)
             idx = np.where(self.kmeans_labels == cluster)[0]
             features_tensor, pm_tensor = torch.tensor(features_train[idx]).float(), torch.tensor(pm_train[idx]).float()
             ex_gp_model = ExactGP(features_tensor, pm_tensor)
@@ -177,6 +178,7 @@ class Model(object):
                 posterior = ex_gp_model(features_tensor)
                 loss = -max_log_likelihood(posterior, pm_tensor)
                 loss.backward()
+                print('Iter %d/%d - Loss: %.3f' % (i + 1, self.iterations, loss.item()))
                 optim.step()
             self.gp_models.append(ex_gp_model)
 
