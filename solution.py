@@ -76,7 +76,7 @@ class Model(object):
 
         # Training
         self.iterations = 100
-        self.num_clusters = 20
+        self.num_clusters = 10
         
         # self.nystroem_feature_map = Nystroem(
         #    gamma=0.2, random_state=1, n_components=1000, n_jobs=-1
@@ -137,9 +137,7 @@ class Model(object):
         centers = self.km_model.predict(features_test)
         for k in range(means.shape[1]):
             gp_mean[k] = means[centers[k], k]
-            gp_std[k] =stds[centers[k], k]
-        gp_mean  = np.array(gp_mean)
-        gp_std = np.array(gp_std)
+            gp_std[k] = stds[centers[k], k]
         
         predictions = self.asymmetric_cost_align(gp_mean, gp_std, test_x_AREA.astype(bool))
         mean_pred = gp_mean * self.pm_std + gp_mean
