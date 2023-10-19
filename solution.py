@@ -26,17 +26,19 @@ COST_W_UNDERPREDICT = 50.0
 COST_W_NORMAL = 1.0
 
 
+# based on example from source code for gpytorch.models.exact_gp
 class ExactGP(ExactGP):
     def __init__(self, features, pm):
         super(ExactGP, self).__init__(features, pm, likelihood=GaussianLikelihood())
         self.mean_module = ConstantMean()
-        self.kernel = [MaternKernel(nu=1.5), LinearKernel()]
+        self.kernel = [MaternKernel(nu=2.5)]
         self.covar_module = ScaleKernel(AdditiveKernel(*self.kernel)) 
 
     def forward(self, x):
         mean_x = self.mean_module(x)
         covar_x = self.covar_module(x)
         return MVN(mean_x, covar_x)
+
 
 class Model(object):
     """
@@ -73,8 +75,8 @@ class Model(object):
         self.gp_models = []
 
         # Training
-        self.iterations = 47
-        self.num_clusters = 10
+        self.iterations = 100
+        self.num_clusters = 20
         
         # self.nystroem_feature_map = Nystroem(
         #    gamma=0.2, random_state=1, n_components=1000, n_jobs=-1
@@ -119,7 +121,8 @@ class Model(object):
         # Preprocessing - normalization
         features_test = (test_x_2D - self.features_mean) / self.features_std
 
-        means, stds = [], []
+        means = []
+        stds = []
         for model in self.gp_models:
             model.eval()
             gp_results = model(torch.tensor(features_test).float())
@@ -129,12 +132,14 @@ class Model(object):
         means = np.array(means)
         stds = np.array(stds)
 
-        gp_mean, gp_std = [], []
+        gp_mean = []
+        gp_std = []
         centers = self.km_model.predict(features_test)
         for k in range(means.shape[1]):
             gp_mean.append(means[centers[k], k])
             gp_std.append(stds[centers[k], k])
-        gp_mean, gp_std = np.array(gp_mean), np.array(gp_std)
+        gp_mean  = np.array(gp_mean)
+        gp_std = np.array(gp_std)
         
         predictions = self.asymmetric_cost_align(gp_mean, gp_std, test_x_AREA.astype(bool))
         mean_pred = gp_mean * self.pm_std + gp_mean
@@ -143,11 +148,6 @@ class Model(object):
         return predictions, mean_pred, std_pred
 
         # return self.lc.predict(self.nystroem_feature_map.transform(test_x_2D)),[],[]
-
-    def cluster(self, X):
-        self.km_model = KMeans(n_clusters=self.num_clusters, random_state=0).fit(X)
-        self.kmeans_labels = self.km_model.labels_
-        self.kmeans_centers = self.km_model.cluster_centers_
 
     def fitting_model(self, train_y: np.ndarray, train_x_2D: np.ndarray):
         """
@@ -161,26 +161,25 @@ class Model(object):
         pm_train = (train_y - self.pm_mean) / self.pm_std 
 
 
-        self.cluster(features_train)
+        self.km_model = KMeans(n_clusters=self.num_clusters, random_state=0).fit(features_train)
+        self.kmeans_labels = self.km_model.labels_
+        self.kmeans_centers = self.km_model.cluster_centers_
 
-        for cluster in range(self.num_clusters): # for each cluster, train local GP
-            print('training on cluster', cluster+1,'/', self.num_clusters)
+        for cluster in range(self.num_clusters):
             idx = np.where(self.kmeans_labels == cluster)[0]
             features_tensor, pm_tensor = torch.tensor(features_train[idx]).float(), torch.tensor(pm_train[idx]).float()
             ex_gp_model = ExactGP(features_tensor, pm_tensor)
             ex_gp_model.train()
-            optim = Adam(ex_gp_model.parameters(), lr=0.01)
+            optim = Adam(ex_gp_model.parameters(), lr=0.05)
             max_log_likelihood = EMLL(ex_gp_model.likelihood, ex_gp_model)
             for i in range(self.iterations):
                 optim.zero_grad()
                 posterior = ex_gp_model(features_tensor)
                 loss = -max_log_likelihood(posterior, pm_tensor)
                 loss.backward()
-                print('Iter %d/%d - Loss: %.3f' % (i + 1, self.iterations, loss.item()))  ############################################
                 optim.step()
             self.gp_models.append(ex_gp_model)
 
-    
 
 # You don't have to change this function
 def cost_function(
