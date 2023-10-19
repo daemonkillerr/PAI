@@ -8,6 +8,14 @@ from matplotlib import cm
 from sklearn.kernel_approximation import Nystroem
 from sklearn.cluster import KMeans
 from sklearn import svm
+import torch
+from gpytorch.means import *
+from gpytorch.kernels import *
+from torch.optim import Adam
+from gpytorch.mlls import ExactMarginalLogLikelihood as EMLL
+from gpytorch.distributions import MultivariateNormal as MVN
+from gpytorch.models import ExactGP
+from gpytorch.likelihoods import GaussianLikelihood
 
 # Set `EXTENDED_EVALUATION` to `True` in order to visualize your predictions.
 EXTENDED_EVALUATION = False
@@ -17,6 +25,18 @@ EVALUATION_GRID_POINTS = 300  # Number of grid points used in extended evaluatio
 COST_W_UNDERPREDICT = 50.0
 COST_W_NORMAL = 1.0
 
+
+class ExactGP(ExactGP):
+    def __init__(self, features, pm):
+        super(ExactGP, self).__init__(features, pm, likelihood=GaussianLikelihood())
+        self.mean_module = ConstantMean()
+        self.kernel = [MaternKernel(nu=1.5), LinearKernel()]
+        self.covar_module = ScaleKernel(AdditiveKernel(*self.kernel)) 
+
+    def forward(self, x):
+        mean_x = self.mean_module(x)
+        covar_x = self.covar_module(x)
+        return MVN(mean_x, covar_x)
 
 class Model(object):
     """
@@ -31,22 +51,39 @@ class Model(object):
         We already provide a random number generator for reproducibility.
         """
         self.rng = np.random.default_rng(seed=0)
-        # Optimal kernel as per CV
-        self.kernel = Matern(1.0, (1e-5, 1e4), nu=2.5) + WhiteKernel(1.0, (1e-5, 1e2))
-        self.gp = GaussianProcessRegressor(
-            kernel=self.kernel,
-            normalize_y=True,
-            n_restarts_optimizer=2,
-            copy_X_train=False,
-            random_state=22,
-        )
+        
+        #self.kernel = Matern(1.0, (1e-5, 1e4), nu=2.5) + WhiteKernel(1.0, (1e-5, 1e2))
+        #self.gp = GaussianProcessRegressor(
+        #    kernel=self.kernel,
+        #    normalize_y=True,
+        #    n_restarts_optimizer=2,
+        #    copy_X_train=False,
+        #    random_state=22,
+        #)
+        
+        self.features_mean = np.array([0.47309344, 0.57262575])
+        self.features_std = np.array([0.2807577,  0.27753265])
+        self.pm_mean = 33.17299788386953
+        self.pm_std = 18.513831967495353
+        
+        self.km_model = None
+        self.kmeans_labels = None
+        self.kmeans_centers = None
+
+        self.gp_models = []
+
+        # Training
+        self.iterations = 47
+        self.num_clusters = 10
+        
         # self.nystroem_feature_map = Nystroem(
         #    gamma=0.2, random_state=1, n_components=1000, n_jobs=-1
         # )
         # self.lc = svm.LinearSVR()
+
         # TODO: Add custom initialization for your model here if necessary
 
-    def predict_cost_align(
+    def asymmetric_cost_align(
         self, gp_mean: np.ndarray, gp_std: np.ndarray, AREA_idxs: np.ndarray
     ) -> np.ndarray:
         """
@@ -59,8 +96,8 @@ class Model(object):
         thresh_mask = AREA_idxs
 
         pred = np.zeros(len(gp_mean))
-        pred[thresh_mask] = gp_mean[thresh_mask]
-        pred[~thresh_mask] = gp_mean[~thresh_mask] + 0.75 * gp_std[~thresh_mask]
+        pred[thresh_mask] = gp_mean[thresh_mask] * self.pm_std + self.pm_mean
+        pred[~thresh_mask] = (gp_mean[~thresh_mask] + 0.2 * gp_std[~thresh_mask]) * self.pm_std + self.pm_mean 
         print("Prediction aligned for asymmetric cost")
 
         return pred
@@ -78,14 +115,39 @@ class Model(object):
         """
 
         # TODO: Use your GP to estimate the posterior mean and stddev for each city_area here
-        gp_mean, gp_std = self.gp.predict(test_x_2D, return_std=True)
 
-        pred = self.predict_cost_align(gp_mean, gp_std, test_x_AREA.astype(bool))
-        # print(gp_std)
+        # Preprocessing - normalization
+        features_test = (test_x_2D - self.features_mean) / self.features_std
 
-        return pred, gp_mean, gp_std
+        means, stds = [], []
+        for model in self.gp_models:
+            model.eval()
+            gp_results = model(torch.tensor(features_test).float())
+            gp_mean, gp_std = gp_results.mean.detach().numpy(), gp_results.variance.detach().numpy()
+            means.append(gp_mean) 
+            stds.append(gp_std)
+        means = np.array(means)
+        stds = np.array(stds)
+
+        gp_mean, gp_std = [], []
+        centers = self.km_model.predict(features_test)
+        for k in range(means.shape[1]):
+            gp_mean.append(means[centers[k], k])
+            gp_std.append(stds[centers[k], k])
+        gp_mean, gp_std = np.array(gp_mean), np.array(gp_std)
+        
+        predictions = self.asymmetric_cost_align(gp_mean, gp_std, test_x_AREA.astype(bool))
+        mean_pred = gp_mean * self.pm_std + gp_mean
+        std_pred = gp_std * self.pm_std
+
+        return predictions, mean_pred, std_pred
 
         # return self.lc.predict(self.nystroem_feature_map.transform(test_x_2D)),[],[]
+
+    def cluster(self, X):
+        self.km_model = KMeans(n_clusters=self.num_clusters, random_state=0).fit(X)
+        self.kmeans_labels = self.km_model.labels_
+        self.kmeans_centers = self.km_model.cluster_centers_
 
     def fitting_model(self, train_y: np.ndarray, train_x_2D: np.ndarray):
         """
@@ -94,32 +156,31 @@ class Model(object):
         :param train_y: Training pollution concentrations as a 1d NumPy float array of shape (NUM_SAMPLES,)
         """
 
-        train_x_2D, train_y = samp_reduce(train_x_2D, train_y)
-        print("Sample size reduced: %s / %s" % (train_x_2D.shape, train_y.shape))
-
-        self.gp.fit(train_x_2D, train_y)
-        print("Kernel:", self.gp.kernel_)
-        # self.lc.fit(self.nystroem_feature_map.fit_transform(train_x_2D), train_y)
+        # Preprocessing - normalization
+        features_train = (train_x_2D - self.features_mean) / self.features_std
+        pm_train = (train_y - self.pm_mean) / self.pm_std 
 
 
-def samp_reduce(train_x, train_y, k=5000):
-    """
-    Reduces the sample size via k-means clustering
-    to deal with GP inference complexity.
+        self.cluster(features_train)
 
-    :k: desired sample size
-    """
+        for cluster in range(self.num_clusters): # for each cluster, train local GP
+            print('training on cluster', cluster+1,'/', self.num_clusters)
+            idx = np.where(self.kmeans_labels == cluster)[0]
+            features_tensor, pm_tensor = torch.tensor(features_train[idx]).float(), torch.tensor(pm_train[idx]).float()
+            ex_gp_model = ExactGP(features_tensor, pm_tensor)
+            ex_gp_model.train()
+            optim = Adam(ex_gp_model.parameters(), lr=0.01)
+            max_log_likelihood = EMLL(ex_gp_model.likelihood, ex_gp_model)
+            for i in range(self.iterations):
+                optim.zero_grad()
+                posterior = ex_gp_model(features_tensor)
+                loss = -max_log_likelihood(posterior, pm_tensor)
+                loss.backward()
+                print('Iter %d/%d - Loss: %.3f' % (i + 1, self.iterations, loss.item()))  ############################################
+                optim.step()
+            self.gp_models.append(ex_gp_model)
 
-    cluster = KMeans(n_clusters=k)
-    cluster.fit(train_x, train_y)
-
-    train_y_new = np.empty((k,))
-    for i in range(0, k):
-        idx = cluster.labels_ == i
-        train_y_new[i] = train_y[idx].mean()
-    train_x_new = cluster.cluster_centers_
-    return train_x_new, train_y_new
-
+    
 
 # You don't have to change this function
 def cost_function(
