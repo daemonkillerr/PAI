@@ -75,7 +75,7 @@ class Model(object):
         self.gp_models = []
 
         # Training
-        self.iterations = 10
+        self.iterations = 100
         self.num_clusters = 10
         
         # self.nystroem_feature_map = Nystroem(
@@ -127,7 +127,8 @@ class Model(object):
         for model in self.gp_models:
             model.eval()
             gp_results = model(torch.tensor(features_test).float())
-            gp_mean, gp_std = gp_results.mean.detach().numpy(), gp_results.variance.detach().numpy()
+            gp_mean = gp_results.mean.detach().numpy()
+            gp_std = gp_results.variance.detach().numpy()
             means[counter,:] = gp_mean
             stds[counter,:] = gp_std
             counter = counter + 1
