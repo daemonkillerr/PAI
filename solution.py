@@ -31,8 +31,8 @@ class ExactGP(ExactGP):
     def __init__(self, features, pm):
         super(ExactGP, self).__init__(features, pm, likelihood=GaussianLikelihood())
         self.mean_module = ConstantMean()
-        self.kernel = [MaternKernel(nu=2.5)]
-        self.covar_module = ScaleKernel(AdditiveKernel(*self.kernel)) 
+        self.kernel = [MaternKernel(nu=1.5)]
+        self.covar_module = ScaleKernel(AdditiveKernel(*self.kernel))
 
     def forward(self, x):
         mean_x = self.mean_module(x)
@@ -53,21 +53,23 @@ class Model(object):
         We already provide a random number generator for reproducibility.
         """
         self.rng = np.random.default_rng(seed=0)
-        
-        #self.kernel = Matern(1.0, (1e-5, 1e4), nu=2.5) + WhiteKernel(1.0, (1e-5, 1e2))
-        #self.gp = GaussianProcessRegressor(
+
+        # The simple Gaussian Process Regressor gave a score of ~18 with these hyperparameters
+        # self.kernel = Matern(1.0, (1e-5, 1e4), nu=2.5) + WhiteKernel(1.0, (1e-5, 1e2))
+        # self.gp = GaussianProcessRegressor(
         #    kernel=self.kernel,
         #    normalize_y=True,
         #    n_restarts_optimizer=2,
         #    copy_X_train=False,
         #    random_state=22,
-        #)
-        
+        # )
+
+        # Calculating Empirical Mean and Standard Deviation
         self.features_mean = np.array([0.47309344, 0.57262575])
-        self.features_std = np.array([0.2807577,  0.27753265])
+        self.features_std = np.array([0.2807577, 0.27753265])
         self.pm_mean = 33.17299788386953
         self.pm_std = 18.513831967495353
-        
+
         self.km_model = None
         self.kmeans_labels = None
         self.kmeans_centers = None
@@ -77,7 +79,8 @@ class Model(object):
         # Training
         self.iterations = 100
         self.num_clusters = 10
-        
+
+        #Nystroem method for subsampling along with Linear SVR didnt perform well with a very high score of ~2000
         # self.nystroem_feature_map = Nystroem(
         #    gamma=0.2, random_state=1, n_components=1000, n_jobs=-1
         # )
@@ -89,9 +92,9 @@ class Model(object):
         self, gp_mean: np.ndarray, gp_std: np.ndarray, AREA_idxs: np.ndarray
     ) -> np.ndarray:
         """
-        Custom prediction assignment based on asymmetric cost.
-        If threshold value within one std of pred mean, then pred = threshold.
-        Else attempt to underpredict by subtracting a fraction of the std.
+        Asymmetric cost-based custom prediction assignment.
+        Prediction = mean whether the newly discovered area qualifies as a candidate.
+        By adding a portion of the standard deviation, try to overpredict.
 
         :returns: predictions based on above rule
         """
@@ -99,7 +102,9 @@ class Model(object):
 
         pred = np.zeros(len(gp_mean))
         pred[thresh_mask] = gp_mean[thresh_mask] * self.pm_std + self.pm_mean
-        pred[~thresh_mask] = (gp_mean[~thresh_mask] + 0.2 * gp_std[~thresh_mask]) * self.pm_std + self.pm_mean 
+        pred[~thresh_mask] = (
+            gp_mean[~thresh_mask] + 0.2 * gp_std[~thresh_mask]
+        ) * self.pm_std + self.pm_mean
         print("Prediction aligned for asymmetric cost")
 
         return pred
@@ -129,8 +134,8 @@ class Model(object):
             gp_results = model(torch.tensor(features_test).float())
             gp_mean = gp_results.mean.detach().numpy()
             gp_std = gp_results.variance.detach().numpy()
-            means[counter,:] = gp_mean
-            stds[counter,:] = gp_std
+            means[counter, :] = gp_mean
+            stds[counter, :] = gp_std
             counter = counter + 1
 
         gp_mean = np.zeros(means.shape[1])
@@ -139,8 +144,10 @@ class Model(object):
         for k in range(means.shape[1]):
             gp_mean[k] = means[centers[k], k]
             gp_std[k] = stds[centers[k], k]
-        
-        predictions = self.asymmetric_cost_align(gp_mean, gp_std, test_x_AREA.astype(bool))
+
+        predictions = self.asymmetric_cost_align(
+            gp_mean, gp_std, test_x_AREA.astype(bool)
+        )
         mean_pred = gp_mean * self.pm_std + gp_mean
         std_pred = gp_std * self.pm_std
 
@@ -148,6 +155,7 @@ class Model(object):
 
         # return self.lc.predict(self.nystroem_feature_map.transform(test_x_2D)),[],[]
 
+    # Training Multiple Local GP method
     def fitting_model(self, train_y: np.ndarray, train_x_2D: np.ndarray):
         """
         Fit your model on the given training data.
@@ -157,27 +165,35 @@ class Model(object):
 
         # Preprocessing - normalization
         features_train = (train_x_2D - self.features_mean) / self.features_std
-        pm_train = (train_y - self.pm_mean) / self.pm_std 
+        pm_train = (train_y - self.pm_mean) / self.pm_std
 
-
-        self.km_model = KMeans(n_clusters=self.num_clusters, random_state=0).fit(features_train)
+        # initialising kmeans model
+        self.km_model = KMeans(n_clusters=self.num_clusters, random_state=0).fit(
+            features_train
+        )
         self.kmeans_labels = self.km_model.labels_
         self.kmeans_centers = self.km_model.cluster_centers_
 
+        # Multiple local GPs
         for cluster in range(self.num_clusters):
-            print('training on cluster', cluster+1,'/', self.num_clusters)
+            print("training on cluster", cluster + 1, "/", self.num_clusters)
             idx = np.where(self.kmeans_labels == cluster)[0]
-            features_tensor, pm_tensor = torch.tensor(features_train[idx]).float(), torch.tensor(pm_train[idx]).float()
+            features_tensor, pm_tensor = (
+                torch.tensor(features_train[idx]).float(),
+                torch.tensor(pm_train[idx]).float(),
+            )
             ex_gp_model = ExactGP(features_tensor, pm_tensor)
             ex_gp_model.train()
             optim = Adam(ex_gp_model.parameters(), lr=0.05)
             max_log_likelihood = EMLL(ex_gp_model.likelihood, ex_gp_model)
+            
+            # maximising max_log_likelihood
             for i in range(self.iterations):
                 optim.zero_grad()
                 posterior = ex_gp_model(features_tensor)
                 loss = -max_log_likelihood(posterior, pm_tensor)
                 loss.backward()
-                print('Iter %d/%d - Loss: %.3f' % (i + 1, self.iterations, loss.item()))
+                print("Iter %d/%d - Loss: %.3f" % (i + 1, self.iterations, loss.item()))
                 optim.step()
             self.gp_models.append(ex_gp_model)
 
