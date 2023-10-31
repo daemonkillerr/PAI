@@ -107,16 +107,21 @@ class SWAGDiagonal:
 
     def record_snapshot(self, param):
         # Record a snapshot of the model's weights
+        
         if self.mean_weights is None:
             self.mean_weights = param
+            #print('Initial weight size', self.mean_weights.size())
             self.variance_weights = param ** 2
         else:
+            #print('Initial weight size', self.mean_weights.size())
             # Update mean and variance using Welford's online algorithm
             self.num_snapshots += 1
             delta = param - self.mean_weights
             self.mean_weights += delta / self.num_snapshots
             delta2 = param - self.mean_weights
             self.variance_weights += delta * delta2
+            #print('Final weight size', self.mean_weights.size())
+
 
     def calculate_covariance(self):
         # Calculate the diagonal covariance matrix
@@ -136,17 +141,26 @@ class SWAGDiagonal:
             self.model.load_state_dict(sampled_state_dict)  # Load the updated state dictionary into the model
             #self.model.set_weights(self.mean_weights)
 
-    def sample_from_swag(self):
+    def sample_from_swag(self, name):
         # Sample a set of weights from SWAG with diagonal covariance
         if self.mean_weights is not None:
             # Assuming the covariance matrix is diagonal
             #sampled_weights = np.random.randn(len(self.mean_weights)) * np.sqrt(self.covariance_weights)
+            
+            #print('Term 1 : ', torch.randn(self.mean_weights.size()).size())
+            #print('Term 2 : ', torch.sqrt(self.covariance_weights).size())
+            #print('Term 3 : ', self.mean_weights.size())
+            
+            
+            sampled_state_dict = self.model.state_dict()  # Get the state dictionary of the model
+            #for name, param in sampled_state_dict.items():
             sampled_weights = torch.randn(self.mean_weights.size()) * torch.sqrt(self.covariance_weights)
             sampled_weights += self.mean_weights
-
-            sampled_state_dict = self.model.state_dict()  # Get the state dictionary of the model
-            for name, param in sampled_state_dict.items():
-                sampled_state_dict[name] = sampled_weights  # Update the state dictionary with the sampled weights
+            #self.record_snapshot(param)
+            #print('Sampled state dict before adding new weights', sampled_state_dict[name].size())
+            sampled_state_dict[name] = sampled_weights  # Update the state dictionary with the sampled weights
+            #print('Sampled state dict after adding new weights', sampled_state_dict[name].size())
+            #print('Sampled weight size', sampled_weights.size())
 
             self.model.load_state_dict(sampled_state_dict)  # Load the updated state dictionary into the model
             #self.model.set_weights(sampled_weights)
@@ -182,7 +196,7 @@ class SWAGInference(object):
         # TODO(2): change inference_mode to InferenceMode.SWAG_FULL
         inference_mode: InferenceMode = InferenceMode.SWAG_DIAGONAL,
         # TODO(2): optionally add/tweak hyperparameters
-        swag_epochs: int = 1, ###############################################################
+        swag_epochs: int = 30, ###############################################################
         swag_learning_rate: float = 0.045,
         swag_update_freq: int = 1,
         deviation_matrix_max_rank: int = 15,
@@ -371,27 +385,42 @@ class SWAGInference(object):
         # for each datapoint, you can save time by sampling self.bma_samples networks,
         # and perform inference with each network on all samples in loader.
         per_model_sample_predictions = []
+        
         for _ in tqdm.trange(self.bma_samples, desc="Performing Bayesian model averaging"):
             # TODO(1): Sample new parameters for self.network from the SWAG approximate posterior
             # You can use the SWAGDiagonal class to sample weights
             sampled_weights = {}
             for name, swag_diag in self.swag_diagonal.items():
-                swag_diag.sample_from_swag()
+                #self.swag_diagonal[name].record_snapshot(swag_diag)
+                swag_diag.sample_from_swag(name)
                 sampled_weights[name] = self.network.state_dict()[name].clone()  # Clone the sampled weights
             #raise NotImplementedError("Sample network parameters")
 
             # TODO(1): Perform inference for all samples in `loader` using current model sample,
             #  and add the predictions to per_model_sample_predictions
-            per_model_sample_predictions = []
-            for batch in loader:
-                inputs, _ = batch  # Assuming you have inputs in a batch
+            sum = 0
+            counter = 1
+            per_input_prediction = []
+            for (inputs,) in loader:
+                #inputs = batch  # Assuming you have inputs in a batch
+                #print('TYPE OF INPUT ', type(input))
                 with torch.no_grad():
                     model_sample = self.network  # Replace with a copy of your network with sampled weights
                     model_sample.eval()
                     predictions = model_sample(inputs)  # Get model predictions for the batch
-                    per_model_sample_predictions.append(predictions)
-            #raise NotImplementedError("Perform inference using current model")
+                    per_input_prediction.append(predictions)
+                    #print('PREDICTIONS ', predictions)
+                    #print('PREDICTION SIZE ', predictions.size())
+                per_input_prediction1 = torch.stack(per_input_prediction)
+                reshaped_pred = torch.reshape(per_input_prediction1, (per_input_prediction1.size(0)*per_input_prediction1.size(1), per_input_prediction1.size(2)))
+            per_model_sample_predictions.append(reshaped_pred)
+        for model_sample_predictions in per_model_sample_predictions:
+            print(model_sample_predictions.dim()) 
+            print(model_sample_predictions.size())
+        #raise NotImplementedError("Perform inference using current model")
 
+        #print(per_model_sample_predictions[0].dim())
+        #print(per_model_sample_predictions[0].size(1))
         assert len(per_model_sample_predictions) == self.bma_samples
         assert all(
             isinstance(model_sample_predictions, torch.Tensor)
@@ -608,7 +637,7 @@ class SWAGInference(object):
         # Create a loader that we can deterministically iterate many times if necessary
         loader = torch.utils.data.DataLoader(
             torch.utils.data.TensorDataset(xs),
-            batch_size=32,
+            batch_size=20,                                    ##################################################################################################################################################
             shuffle=False,
             num_workers=0,
             drop_last=False,
