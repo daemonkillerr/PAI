@@ -28,7 +28,7 @@ If you set the constant to `False` (to further experiment),
 this solution always performs MAP inference before running your SWAG implementation.
 Note that MAP inference can take a long time.
 """
-#mps_device = torch.device("mps")
+#device = torch.device("mps")
 
 def main():
     # raise RuntimeError(
@@ -142,7 +142,7 @@ class SWAGInference(object):
 
         # Network used to perform SWAG.
         # Note that all operations in this class modify this network IN-PLACE!
-        self.network = CNN(in_channels=3, out_classes=6)
+        self.network = CNN(in_channels=3, out_classes=6)#.to(device)
 
         # Store training dataset to recalculate batch normalization statistics during SWAG inference
         self.train_dataset = torch.utils.data.TensorDataset(train_xs)
@@ -217,7 +217,7 @@ class SWAGInference(object):
         )
 
         # TODO(1): Perform initialization for SWAG fitting
-        current_params = {name: param.detach() for name, param in self.network.named_parameters()}
+        current_params = {name: param.clone().detach() for name, param in self.network.named_parameters()}
 
         # SWAG-diagonal
         for name, param in current_params.items():
@@ -225,7 +225,7 @@ class SWAGInference(object):
             self._swag_diagonal_n[name] = 0
             self._swag_diagonal_mean[name] = param
             self._swag_diagonal_var[name] = param ** 2
-        
+        #print(self._swag_diagonal_mean["layer0.0.weight"])
         self.network.train()
         with tqdm.trange(self.swag_epochs, desc="Running gradient descent for SWA") as pbar:
             pbar_dict = {}
@@ -234,6 +234,7 @@ class SWAGInference(object):
                 average_accuracy = 0.0
                 num_samples_processed = 0
                 for batch_xs, batch_is_snow, batch_is_cloud, batch_ys in loader:
+                    #batch_xs, batch_ys = batch_xs.to(device), batch_ys.to(device)
                     optimizer.zero_grad()
                     pred_ys = self.network(batch_xs)
                     batch_loss = loss(input=pred_ys, target=batch_ys)
@@ -254,7 +255,7 @@ class SWAGInference(object):
                     pbar_dict["avg. epoch loss"] = average_loss
                     pbar_dict["avg. epoch accuracy"] = average_accuracy
                     pbar.set_postfix(pbar_dict)
-
+                #print(self._swag_diagonal_mean["layer0.0.weight"])
                 # TODO(1): Implement periodic SWAG updates using the attributes defined in __init__
                 if epoch % self.swag_update_freq == 0:
                     self.update_swag()
@@ -291,7 +292,7 @@ class SWAGInference(object):
         That is, output row i column j should be your predicted p(y=j | x_i).
         """
 
-        #self.network.eval()
+        self.network.eval()
 
         # Perform Bayesian model averaging:
         # Instead of sampling self.bma_samples networks (using self.sample_parameters())
@@ -306,8 +307,8 @@ class SWAGInference(object):
             # and add the predictions to per_model_sample_predictions
             model_sample_predictions = []
             for (xs,) in loader:
-                logits = self.network(xs)
-                model_sample_predictions.append(logits)
+                #xs = xs.to(device)
+                model_sample_predictions.append(self.network(xs))
             per_model_sample_predictions.append(torch.cat(model_sample_predictions))
 
         assert len(per_model_sample_predictions) == self.bma_samples
@@ -334,7 +335,7 @@ class SWAGInference(object):
         # Instead of acting on a full vector of parameters, all operations can be done on per-layer parameters.
         for name, param in self.network.named_parameters():
             # SWAG-diagonal part
-            z_1 = torch.randn(param.size())
+            z_1 = torch.randn(param.size())#.to(device)
             # TODO(1): Sample parameter values for SWAG-diagonal
             current_mean = self._swag_diagonal_mean[name]
             current_std = torch.sqrt(self._swag_diagonal_var[name])
@@ -567,6 +568,7 @@ class SWAGInference(object):
 
         self.network.train()
         for (batch_xs,) in loader:
+            #batch_xs = batch_xs.to(device)
             self.network(batch_xs)
         self.network.eval()
 
@@ -638,6 +640,7 @@ def evaluate(
 
     # We ignore is_snow and is_cloud here, but feel free to use them as well
     xs, is_snow, is_cloud, ys = eval_dataset.tensors
+    #xs, ys = xs.to(device), ys.to(device)
 
     # Predict class probabilities on test data,
     # most likely classes (according to the max predicted probability),
@@ -675,7 +678,7 @@ def evaluate(
     print("Note that this threshold does not necessarily generalize to the test set!")
 
     # Calculate ECE and plot the calibration curve
-    calibration_data = calc_calibration_curve(pred_prob_all.numpy(), ys.numpy(), num_bins=20)
+    calibration_data = calc_calibration_curve(pred_prob_all.cpu().numpy(), ys.cpu().numpy(), num_bins=20)
     print("Validation ECE:", calibration_data["ece"])
 
     if extended_evaluation:
