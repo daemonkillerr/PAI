@@ -150,9 +150,9 @@ class SWAGInference(object):
         # SWAG-diagonal
         # create attributes for SWAG-diagonal
         self._swag_diagonal_mean = self._create_weight_copy()
-        self._swag_diagonal_var = self._create_weight_copy()
-        self._swag_diagonal_n = {name: 0 for name in self.network.named_parameters()}
-        
+        self._swag_diagonal_sq_mean = self._create_weight_copy()
+        self._swag_diagonal_n = {name: 0 for name in self.network.state_dict().keys()}
+
         #  Hint: self._create_weight_copy() creates an all-zero copy of the weights
         #  as a dictionary that maps from weight name to values.
         #  Hint: you never need to consider the full vector of weights,
@@ -179,14 +179,19 @@ class SWAGInference(object):
         for name, param in current_params.items():
             # TODO(1): update SWAG-diagonal attributes for weight `name` using `current_params` and `param`
             self._swag_diagonal_n[name] += 1
-            delta = param - self._swag_diagonal_mean[name]
-            self._swag_diagonal_mean[name] += delta / self._swag_diagonal_n[name]
-            self._swag_diagonal_var[name] += delta * (param - self._swag_diagonal_mean[name])
+            self._swag_diagonal_mean[name] += (param - self._swag_diagonal_mean[name]) / self._swag_diagonal_n[name]
+            self._swag_diagonal_sq_mean[name] += (param ** 2 - self._swag_diagonal_sq_mean[name]) / self._swag_diagonal_n[name]
 
         # Full SWAG
         if self.inference_mode == InferenceMode.SWAG_FULL:
             # TODO(2): update full SWAG attributes for weight `name` using `current_params` and `param`
-            raise NotImplementedError("Update full SWAG statistics")
+            for name, param in current_params.items():
+                if name not in self._swag_diagonal_samples:
+                    self._swag_diagonal_samples[name] = collections.deque([torch.zeros_like(param)])
+                self._swag_diagonal_samples[name].append(param)
+                if len(self._swag_diagonal_samples[name]) > self.deviation_matrix_max_rank:
+                    self._swag_diagonal_samples[name].popleft()
+
 
     def fit_swag(self, loader: torch.utils.data.DataLoader) -> None:
         """
@@ -216,16 +221,11 @@ class SWAGInference(object):
             steps_per_epoch=len(loader),
         )
 
-        # TODO(1): Perform initialization for SWAG fitting
-        current_params = {name: param.clone().detach() for name, param in self.network.named_parameters()}
+        # Perform initialization for SWAG fitting with initial weights
+        #self._swag_diagonal_n = {name: 0 for name in self.network.state_dict().keys()}
+        #self._swag_diagonal_mean = {name: torch.zeros_like(param) for name, param in self.network.named_parameters()}
+        #self._swag_diagonal_sq_mean = {name: torch.zeros_like(param) for name, param in self.network.named_parameters()}
 
-        # SWAG-diagonal
-        for name, param in current_params.items():
-            # Initialize SWAG-diagonal attributes for weight `name` using `current_params` and `param`
-            self._swag_diagonal_n[name] = 0
-            self._swag_diagonal_mean[name] = param
-            self._swag_diagonal_var[name] = param ** 2
-        #print(self._swag_diagonal_mean["layer0.0.weight"])
         self.network.train()
         with tqdm.trange(self.swag_epochs, desc="Running gradient descent for SWA") as pbar:
             pbar_dict = {}
@@ -255,7 +255,7 @@ class SWAGInference(object):
                     pbar_dict["avg. epoch loss"] = average_loss
                     pbar_dict["avg. epoch accuracy"] = average_accuracy
                     pbar.set_postfix(pbar_dict)
-                #print(self._swag_diagonal_mean["layer0.0.weight"])
+
                 # TODO(1): Implement periodic SWAG updates using the attributes defined in __init__
                 if epoch % self.swag_update_freq == 0:
                     self.update_swag()
@@ -308,8 +308,11 @@ class SWAGInference(object):
             model_sample_predictions = []
             for (xs,) in loader:
                 #xs = xs.to(device)
-                model_sample_predictions.append(self.network(xs))
-            per_model_sample_predictions.append(torch.cat(model_sample_predictions))
+                predictions = self.network(xs)
+                model_sample_predictions.append(predictions)
+            model_sample_predictions = torch.cat(model_sample_predictions)
+            model_sample_predictions = torch.softmax(model_sample_predictions, dim=-1)
+            per_model_sample_predictions.append(model_sample_predictions)
 
         assert len(per_model_sample_predictions) == self.bma_samples
         assert all(
@@ -320,7 +323,7 @@ class SWAGInference(object):
         )
 
         # TODO(1): Average predictions from different model samples into bma_probabilities
-        bma_probabilities = torch.softmax(torch.stack(per_model_sample_predictions).mean(dim=0), dim=-1)
+        bma_probabilities = torch.stack(per_model_sample_predictions).mean(dim=0)
 
         assert bma_probabilities.dim() == 2 and bma_probabilities.size(1) == 6  # N x C
         return bma_probabilities
@@ -335,10 +338,10 @@ class SWAGInference(object):
         # Instead of acting on a full vector of parameters, all operations can be done on per-layer parameters.
         for name, param in self.network.named_parameters():
             # SWAG-diagonal part
-            z_1 = torch.randn(param.size())#.to(device)
+            z_1 = torch.randn(param.size(), requires_grad=False)#.to(device)
             # TODO(1): Sample parameter values for SWAG-diagonal
             current_mean = self._swag_diagonal_mean[name]
-            current_std = torch.sqrt(self._swag_diagonal_var[name])
+            current_std = (self._swag_diagonal_sq_mean[name] - self._swag_diagonal_mean[name] ** 2).sqrt()
             assert current_mean.size() == param.size() and current_std.size() == param.size()
 
             # Diagonal part
