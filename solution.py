@@ -225,6 +225,8 @@ class SWAGInference(object):
         #self._swag_diagonal_n = {name: 0 for name in self.network.state_dict().keys()}
         #self._swag_diagonal_mean = {name: torch.zeros_like(param) for name, param in self.network.named_parameters()}
         #self._swag_diagonal_sq_mean = {name: torch.zeros_like(param) for name, param in self.network.named_parameters()}
+        self._swag_diagonal_mean = {name: param.clone() for name, param in self.network.named_parameters()}
+        self._swag_diagonal_sq_mean = {name: param.clone()**2 for name, param in self.network.named_parameters()}
 
         self.network.train()
         with tqdm.trange(self.swag_epochs, desc="Running gradient descent for SWA") as pbar:
