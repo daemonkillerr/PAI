@@ -225,6 +225,7 @@ class SWAGInference(object):
         )
         # TODO(2): Update SWAGScheduler instantiation if you decided to implement a custom schedule.
         #  By default, this scheduler just keeps the initial learning rate given to `optimizer`.
+        '''
         lr_scheduler = SWAGScheduler(
             optimizer,
             epochs=self.swag_epochs,
@@ -235,7 +236,7 @@ class SWAGInference(object):
             init_lr=self.init_lr
 
         )
-
+        '''
         # Perform initialization for SWAG fitting with initial weights
         #self._swag_diagonal_n = {name: 0 for name in self.network.state_dict().keys()}
         #self._swag_diagonal_mean = {name: torch.zeros_like(param) for name, param in self.network.named_parameters()}
@@ -248,6 +249,16 @@ class SWAGInference(object):
         with tqdm.trange(self.swag_epochs, desc="Running gradient descent for SWA") as pbar:
             pbar_dict = {}
             for epoch in pbar:
+                lr_scheduler = SWAGScheduler(
+                optimizer,
+                epochs=self.swag_epochs,
+                steps_per_epoch=len(loader),
+                swa_start=10,
+                swa_lr=self.swag_learning_rate,
+                swa=self.swa,
+                init_lr=self.init_lr
+
+            )
                 average_loss = 0.0
                 average_accuracy = 0.0
                 num_samples_processed = 0
@@ -308,12 +319,6 @@ class SWAGInference(object):
             if validation_acc > best_validation_acc:
                 best_validation_acc = validation_acc
                 self._prediction_threshold = threshold
-        
-        You did not beat the easy baseline in terms of public cost.
-    Your PUBLIC test cost is 1.353 and PUBLIC test ECE is 0.056.
-    Your penalized PUBLIC cost 1.353 is thus worse than the easy baseline's PUBLIC cost 0.901.
-    Try to improve it!
-
         '''
 
         # TODO(2): perform additional calibration if desired.
@@ -642,8 +647,9 @@ class SWAGScheduler(torch.optim.lr_scheduler.LRScheduler):
         This method should return a single float: the new learning rate.
         """
         # TODO(2): Implement a custom schedule if desired
-        t = (self.epochs) / (self.swa_start if self.swa else self.epochs)
-        lr_ratio = self.swa_lr / self.init_lr if self.swa else 0.01
+        #t = current_epoch / (self.swa_start if self.swa else self.epochs)
+        t = current_epoch / self.epochs
+        lr_ratio = old_lr / self.swa_lr if self.swa else 0.01
         if t <= 0.5:
             factor = 1.0
         elif t <= 0.9:
