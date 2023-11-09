@@ -656,7 +656,7 @@ class SWAGScheduler(torch.optim.lr_scheduler.LRScheduler):
             factor = 1.0 - (1.0 - lr_ratio) * (t - 0.5) / 0.4
         else:
             factor = lr_ratio
-        return self.init_lr * factor
+        return self.swa_lr * factor
         #return old_lr
 
     # TODO(2): Add and store additional arguments if you decide to implement a custom scheduler
