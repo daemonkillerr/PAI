@@ -1,457 +1,272 @@
-"""Solution."""
-
-import math
+import torch
+import torch.optim as optim
+import torch.nn.functional as F
+from torch.distributions import Normal
+import torch.nn as nn
 import numpy as np
-from scipy.optimize import fmin_l_bfgs_b
-from scipy.stats import norm
-
-
-from sklearn.gaussian_process import GaussianProcessRegressor
-from sklearn.gaussian_process.kernels import Matern, ConstantKernel, WhiteKernel
-
+import sys
+sys.path.append('C:/Users/andje/miniconda3/envs/py11/Lib/site-packages')
+from gym.wrappers.monitoring.video_recorder import VideoRecorder
 import warnings
-warnings.filterwarnings("ignore")
-
-# global variables
-np.random.seed(14504)
-DOMAIN = np.array([[0, 10]])  # restrict \theta in [0, 10]
-SAFETY_THRESHOLD = 4  # threshold, upper bound of SA
-
-""" Solution """
-
-class BO_algo():
-    def __init__(self):
-        """Initializes the algorithm with a parameter configuration. """
-        self.v_max = SAFETY_THRESHOLD
-
-        self.x_sample = np.empty((0, DOMAIN.shape[0]))
-        self.f_sample = np.empty((0, DOMAIN.shape[0]))
-        self.v_sample = np.empty((0, DOMAIN.shape[0]))
-        #self.logv_sample = np.empty((0, DOMAIN.shape[0]))
-        self.gv_sample = np.empty((0, DOMAIN.shape[0]))
-
-        self.f_kernel = 0.125* Matern(length_scale=10, length_scale_bounds=(1e-5, 1e5), nu=2.5) + WhiteKernel(0.5**2)
-        self.f_gpr = GaussianProcessRegressor(
-            kernel=self.f_kernel,
-            alpha=0.15
-        )
-
-        self.v_kernel = ConstantKernel(4) + math.sqrt(2) * Matern(length_scale=0.5, length_scale_bounds=(1e-5, 1e5), nu=2.5) + WhiteKernel(0.0001**2)
-        self.v_gpr = GaussianProcessRegressor(
-            kernel=self.v_kernel,
-            alpha=0.0001
-        )
+from typing import Union
+from utils import ReplayBuffer, get_env, run_episode
 
 
-    def next_recommendation(self):
-        """
-        Recommend the next input to sample.
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+warnings.filterwarnings("ignore", category=UserWarning)
 
-        Returns
-        -------
-        recommendation: float
-            the next point to evaluate
-        """
-        if self.x_sample.size == 0:
-            init_recommendation = np.random.uniform(low=DOMAIN[:, 0], high=DOMAIN[:,1])
-            next_recommend = init_recommendation.reshape(-1, DOMAIN.shape[0])
+class NeuralNetwork(nn.Module):
+    '''
+    This class implements a neural network with a variable number of hidden layers and hidden units.
+    You may use this function to parametrize your policy and critic networks.
+    '''
+    def __init__(self, input_dim: int, output_dim: int, hidden_size: int, 
+                                hidden_layers: int, activation: str):
+        super(NeuralNetwork, self).__init__()
+
+        # List to hold the layers of the network
+        layers = []
+
+        # Input layer
+        layers.append(nn.Linear(input_dim, hidden_size))
+        if activation == 'relu':
+            layers.append(nn.ReLU())
+        elif activation == 'tanh':
+            layers.append(nn.Tanh())
         else:
-            if len(self.f_sample) == 12 and np.all(self.f_sample < 0.4):
-                DOMAIN_midpoint = (DOMAIN[:, 1] - DOMAIN[:, 0])/2
-                init_recommendation = (self.x_sample[0] + DOMAIN_midpoint) % DOMAIN[:, 1]
-                next_recommend = init_recommendation.reshape(-1, DOMAIN.shape[0])
-            else:
-                next_recommend = self.optimize_acquisition_function()
+            raise NotImplementedError(f"Activation {activation} not implemented.")
 
-        return np.atleast_2d(next_recommend)
+        # Hidden layers
+        for _ in range(hidden_layers - 1):
+            layers.append(nn.Linear(hidden_size, hidden_size))
+            if activation == 'relu':
+                layers.append(nn.ReLU())
+            elif activation == 'tanh':
+                layers.append(nn.Tanh())
 
-    def optimize_acquisition_function(self):
-        """Optimizes the acquisition function defined below (DO NOT MODIFY).
+        # Output layer
+        layers.append(nn.Linear(hidden_size, output_dim))
 
-        Returns
-        -------
-        x_opt: float
-            the point that maximizes the acquisition function, where
-            x_opt in range of DOMAIN
-        """
-        def objective(x):
-            return -self.acquisition_function(x)
+        # Define the network using Sequential
+        self.model = nn.Sequential(*layers)
 
-        f_values = []
-        x_values = []
-
-        # Restarts the optimization 20 times and pick best solution
-        for _ in range(20):
-            x0 = DOMAIN[:, 0] + (DOMAIN[:, 1] - DOMAIN[:, 0]) * \
-                 np.random.rand(DOMAIN.shape[0])
-            result = fmin_l_bfgs_b(objective, x0=x0, bounds=DOMAIN,
-                                   approx_grad=True)
-            x_values.append(np.clip(result[0], *DOMAIN[0]))
-            f_values.append(-result[1])
-
-        ind = np.argmax(f_values)
-        x_opt = x_values[ind].item()
-
-        return x_opt
-
-    def acquisition_function(self, x):
-        """Compute the acquisition function for x.
-
-        Parameters
-        ----------
-        x: np.ndarray
-            x in domain of f, has shape (N, 1)
-
-        Returns
-        ------
-        af_value: np.ndarray
-            shape (N, 1)
-            Value of the acquisition function at x
-        """
-        x = np.atleast_2d(x)
-        
-        # Expected improvement
-        predicted_mean, predicted_std = self.f_gpr.predict(x, return_std=True)
-
-        mean_sample = self.f_gpr.predict(self.x_sample)
-        predicted_std = predicted_std.reshape(-1, 1)
-        mean_sample_max = np.max(mean_sample)
-        with np.errstate(divide='warn'):
-            improvement = predicted_mean - mean_sample_max
-            Z = improvement / predicted_std
-            cdf_Z = norm.cdf(Z)
-            pdf_Z = norm.pdf(Z)
-            expected_improvement = improvement * cdf_Z + predicted_std * pdf_Z
-            idx = predicted_std==0.0
-            expected_improvement[idx]=0.0
-
-        # Constraint function
-        predicted_values = self.v_gpr.predict(x, return_std=True)
-        mu, sigma = predicted_values
-
-        if sigma != 0:
-            pr = norm.cdf(self.v_max, loc=mu, scale=sigma)
-        else:
-            if mu <= self.v_max:
-                pr = 0.98 * (self.v_max - mu)
-            else:
-                pr = 0.02 * (mu-self.v_max)
-
-        return float(expected_improvement * pr)
-
-    def add_data_point(self, x, f, v):
-        """
-        Add data points to the model.
-
-        Parameters
-        ----------
-        x: float
-            structural features
-        f: float
-            logP obj func
-        v: float
-            SA constraint func
-        """
-        self.x_sample, self.f_sample, self.v_sample = np.vstack((self.x_sample, x)), np.vstack((self.f_sample, f)), np.vstack((self.v_sample, v))
-        self.f_gpr.fit(self.x_sample, self.f_sample)
-        self.v_gpr.fit(self.x_sample, self.v_sample)
-
-    def get_solution(self):
-        """
-        Return x_opt that is believed to be the maximizer of f.
-
-        Returns
-        -------
-        solution: float
-            the optimal solution of the problem
-        """
-        valid_samples = np.where(self.v_sample > self.v_max, -1e9, self.f_sample)
-        best_index = np.argmax(valid_samples)
-        x_opt = self.x_sample[best_index]       
-        return x_opt
+    def forward(self, s: torch.Tensor) -> torch.Tensor:
+        return self.model(s)
     
-    def plot(self, plot_recommendation: bool = True):
-        """Plot objective and constraint posterior for debugging (OPTIONAL).
+class Actor:
+    def __init__(self,hidden_size: int, hidden_layers: int, actor_lr: float,
+                state_dim: int = 3, action_dim: int = 1, device: torch.device = torch.device('cpu')):
+        super(Actor, self).__init__()
 
-        Parameters
-        ----------
-        plot_recommendation: bool
-            Plots the recommended point if True.
-        """
-        pass
+        self.hidden_size = hidden_size
+        self.hidden_layers = hidden_layers
+        self.actor_lr = actor_lr
+        self.state_dim = state_dim
+        self.action_dim = action_dim
+        self.device = device
+        self.LOG_STD_MIN = -20
+        self.LOG_STD_MAX = 2
+        self.setup_actor()
 
+    def setup_actor(self):
+        self.actor_network = NeuralNetwork(self.state_dim, self.action_dim * 2, self.hidden_size,
+                                           self.hidden_layers, activation='relu').to(self.device)
+        self.actor_optimizer = optim.Adam(self.actor_network.parameters(), lr=self.actor_lr)
 
-# ---
-# TOY PROBLEM. To check your code works as expected (ignored by checker).
-# ---
+    def clamp_log_std(self, log_std: torch.Tensor) -> torch.Tensor:
+        return torch.clamp(log_std, self.LOG_STD_MIN, self.LOG_STD_MAX)
 
-def check_in_DOMAIN(x: float):
-    """Validate input"""
-    x = np.atleast_2d(x)
-    return np.all(x >= DOMAIN[None, :, 0]) and np.all(x <= DOMAIN[None, :, 1])
+    def get_action_and_log_prob(self, state: torch.Tensor, deterministic: bool) -> (torch.Tensor, torch.Tensor):
+        assert state.shape == (3,) or state.shape[1] == self.state_dim, 'State passed to this method has a wrong shape'
 
+        mean_std = self.actor_network(state)
+        mean, log_std = torch.split(mean_std, self.action_dim, dim=0)
+        log_std = self.clamp_log_std(log_std)
 
-def f(x: float):
-    """Dummy logP objective"""
-    mid_point = DOMAIN[:, 0] + 0.5 * (DOMAIN[:, 1] - DOMAIN[:, 0])
-    return - np.linalg.norm(x - mid_point, 2)
+        if deterministic:
+            action = mean
+        else:
+            std = torch.exp(log_std)
+            normal = Normal(mean, std)
+            action = normal.sample()
 
-
-def v(x: float):
-    """Dummy SA"""
-    return 2.0
-
-
-def get_initial_safe_point():
-    """Return initial safe point"""
-    x_DOMAIN = np.linspace(*DOMAIN[0], 4000)[:, None]
-    c_val = np.vectorize(v)(x_DOMAIN)
-    x_valid = x_DOMAIN[c_val < SAFETY_THRESHOLD]
-    np.random.seed(0)
-    np.random.shuffle(x_valid)
-    x_init = x_valid[0]
-
-    return x_init
+        log_prob = Normal(mean, std).log_prob(action).sum(axis=-1)
+        return action, log_prob
 
 
-def main():
-    """FOR ILLUSTRATION / TESTING ONLY (NOT CALLED BY CHECKER)."""
-    # Init problem
-    agent = BO_algo()
+class Critic:
+    def __init__(self, hidden_size: int, 
+                 hidden_layers: int, critic_lr: int, state_dim: int = 3, 
+                    action_dim: int = 1,device: torch.device = torch.device('cpu')):
+        super(Critic, self).__init__()
+        self.hidden_size = hidden_size
+        self.hidden_layers = hidden_layers
+        self.critic_lr = critic_lr
+        self.state_dim = state_dim
+        self.action_dim = action_dim
+        self.device = device
+        self.setup_critic()
 
-    # Add initial safe point
-    x_init = get_initial_safe_point()
-    obj_val = f(x_init)
-    cost_val = v(x_init)
-    agent.add_data_point(x_init, obj_val, cost_val)
+    def setup_critic(self):
+        self.critic_network = NeuralNetwork(self.state_dim + self.action_dim, 1, self.hidden_size,
+                                            self.hidden_layers, activation='relu').to(self.device)
+        self.critic_optimizer = optim.Adam(self.critic_network.parameters(), lr=self.critic_lr)
 
-    # Loop until budget is exhausted
-    for j in range(20):
-        # Get next recommendation
-        x = agent.next_recommendation()
+    def get_q_values(self, state: torch.Tensor, action: torch.Tensor) -> torch.Tensor:
+        assert state.shape == (3,) or state.shape[1] == self.state_dim, 'State has a wrong shape'
+        assert action.shape == (1,) or action.shape[1] == self.action_dim, 'Action has a wrong shape'
 
-        # Check for valid shape
-        assert x.shape == (1, DOMAIN.shape[0]), \
-            f"The function next recommendation must return a numpy array of " \
-            f"shape (1, {DOMAIN.shape[0]})"
+        combined = torch.cat((state, action), dim=1)
+        return self.critic_network(combined)
 
-        # Obtain objective and constraint observation
-        obj_val = f(x) + np.random.randn()
-        cost_val = v(x) + np.random.randn()
-        agent.add_data_point(x, obj_val, cost_val)
-    # Validate solution
-    solution = agent.get_solution()
-    assert check_in_DOMAIN(solution), \
-        f'The function get solution must return a point within the' \
-        f'DOMAIN, {solution} returned instead'
+class TrainableParameter:
+    '''
+    This class could be used to define a trainable parameter in your method. You could find it 
+    useful if you try to implement the entropy temerature parameter for SAC algorithm.
+    '''
+    def __init__(self, init_param: float, lr_param: float, 
+                 train_param: bool, device: torch.device = torch.device('cpu')):
+        
+        self.log_param = torch.tensor(np.log(init_param), requires_grad=train_param, device=device)
+        self.optimizer = optim.Adam([self.log_param], lr=lr_param)
 
-    # Compute regret
-    regret = (0 - f(solution))
+    def get_param(self) -> torch.Tensor:
+        return torch.exp(self.log_param)
 
-    print(f'Optimal value: 0\nProposed solution {solution}\nSolution value '
-          f'{f(solution)}\nRegret {regret}\nUnsafe-evals TODO\n')
-
-
-if __name__ == "__main__":
-    main()
-
-
-
-'''
-# Original
-import numpy as np
-from scipy.optimize import fmin_l_bfgs_b
-# import additional ...
+    def get_log_param(self) -> torch.Tensor:
+        return self.log_param
 
 
-# global variables
-DOMAIN = np.array([[0, 10]])  # restrict \theta in [0, 10]
-SAFETY_THRESHOLD = 4  # threshold, upper bound of SA
-
-
-# TODO: implement a self-contained solution in the BO_algo class.
-# NOTE: main() is not called by the checker.
-class BO_algo():
+class Agent:
     def __init__(self):
-        """Initializes the algorithm with a parameter configuration."""
-        # TODO: Define all relevant class members for your BO algorithm here.
-        pass
+        # Environment variables. You don't need to change this.
+        self.state_dim = 3  # [cos(theta), sin(theta), theta_dot]
+        self.action_dim = 1  # [torque] in[-1,1]
+        self.batch_size = 200
+        self.min_buffer_size = 1000
+        self.max_buffer_size = 100000
+        # If your PC possesses a GPU, you should be able to use it for training, 
+        # as self.device should be 'cuda' in that case.
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        print("Using device: {}".format(self.device))
+        self.memory = ReplayBuffer(self.min_buffer_size, self.max_buffer_size, self.device)
+        
+        self.setup_agent()
 
-    def next_recommendation(self):
+    def setup_agent(self):
+        # TODO: Setup off-policy agent with policy and critic classes. 
+        # Feel free to instantiate any other parameters you feel you might need.   
+        self.actor = Actor(hidden_size=128, hidden_layers=4, actor_lr=1e-4, state_dim = self.state_dim, action_dim = self.action_dim, device = self.device)
+        self.critic = Critic(hidden_size=128, hidden_layers=4, critic_lr=1e-3, state_dim = self.state_dim, action_dim = self.action_dim, device = self.device)
+
+    def get_action(self, s: np.ndarray, train: bool) -> np.ndarray:
         """
-        Recommend the next input to sample.
-
-        Returns
-        -------
-        recommendation: float
-            the next point to evaluate
+        :param s: np.ndarray, state of the pendulum. shape (3, )
+        :param train: boolean to indicate if you are in eval or train mode. 
+                    You can find it useful if you want to sample from deterministic policy.
+        :return: np.ndarray,, action to apply on the environment, shape (1,)
         """
-        # TODO: Implement the function which recommends the next point to query
-        # using functions f and v.
-        # In implementing this function, you may use
-        # optimize_acquisition_function() defined below.
+        # TODO: Implement a function that returns an action from the policy for the state s.
+        state = torch.tensor(s, dtype=torch.float32).to(self.device)
+    
+        with torch.no_grad():
+            # Assuming you have an actor network (self.actor) initialized in setup_agent
+            action, _ = self.actor.get_action_and_log_prob(state, not train)
+            action = action.cpu().numpy()  # Convert the action tensor to a NumPy array
 
-        raise NotImplementedError
+        assert action.shape == (1,), 'Incorrect action shape.'
+        assert isinstance(action, np.ndarray ), 'Action dtype must be np.ndarray' 
+        return action
 
-    def optimize_acquisition_function(self):
-        """Optimizes the acquisition function defined below (DO NOT MODIFY).
+    @staticmethod
+    def run_gradient_update_step(object: Union[Actor, Critic], loss: torch.Tensor):
+        '''
+        This function takes in a object containing trainable parameters and an optimizer, 
+        and using a given loss, runs one step of gradient update. If you set up trainable parameters 
+        and optimizer inside the object, you could find this function useful while training.
+        :param object: object containing trainable parameters and an optimizer
+        '''
+        object.optimizer.zero_grad()
+        loss.mean().backward()
+        object.optimizer.step()
 
-        Returns
-        -------
-        x_opt: float
-            the point that maximizes the acquisition function, where
-            x_opt in range of DOMAIN
-        """
+    def critic_target_update(self, base_net: NeuralNetwork, target_net: NeuralNetwork, 
+                             tau: float, soft_update: bool):
+        '''
+        This method updates the target network parameters using the source network parameters.
+        If soft_update is True, then perform a soft update, otherwise a hard update (copy).
+        :param base_net: source network
+        :param target_net: target network
+        :param tau: soft update parameter
+        :param soft_update: boolean to indicate whether to perform a soft update or not
+        '''
+        for param_target, param in zip(target_net.parameters(), base_net.parameters()):
+            if soft_update:
+                param_target.data.copy_(param_target.data * (1.0 - tau) + param.data * tau)
+            else:
+                param_target.data.copy_(param.data)
 
-        def objective(x):
-            return -self.acquisition_function(x)
+    def train_agent(self):
+        '''
+        This function represents one training iteration for the agent. It samples a batch 
+        from the replay buffer,and then updates the policy and critic networks 
+        using the sampled batch.
+        '''
+        # TODO: Implement one step of training for the agent.
+        # Hint: You can use the run_gradient_update_step for each policy and critic.
+        # Example: self.run_gradient_update_step(self.policy, policy_loss)
 
-        f_values = []
-        x_values = []
+        # Batch sampling
+        batch = self.memory.sample(self.batch_size)
+        s_batch, a_batch, r_batch, s_prime_batch = batch
 
-        # Restarts the optimization 20 times and pick best solution
-        for _ in range(20):
-            init_recommendation = DOMAIN[:, 0] + (DOMAIN[:, 1] - DOMAIN[:, 0]) * \
-                 np.random.rand(DOMAIN.shape[0])
-            result = fmin_l_bfgs_b(objective, init_recommendation=init_recommendation, bounds=DOMAIN,
-                                   approx_grad=True)
-            x_values.append(np.clip(result[0], *DOMAIN[0]))
-            f_values.append(-result[1])
+        # TODO: Implement Critic(s) update here.
+        # Critic(s) update
+        critic_loss = self.calculate_critic_loss(s_batch, a_batch, r_batch, s_prime_batch)
+        self.run_gradient_update_step(self.critic, critic_loss)
 
-        ind = np.argmax(f_values)
-        x_opt = x_values[ind].item()
-
-        return x_opt
-
-    def acquisition_function(self, x: np.ndarray):
-        """Compute the acquisition function for x.
-
-        Parameters
-        ----------
-        x: np.ndarray
-            x in domain of f, has shape (N, 1)
-
-        Returns
-        ------
-        af_value: np.ndarray
-            shape (N, 1)
-            Value of the acquisition function at x
-        """
-        x = np.atleast_2d(x)
-        # TODO: Implement the acquisition function you want to optimize.
-        raise NotImplementedError
-
-    def add_data_point(self, x: float, f: float, v: float):
-        """
-        Add data points to the model.
-
-        Parameters
-        ----------
-        x: float
-            structural features
-        f: float
-            logP obj func
-        v: float
-            SA constraint func
-        """
-        # TODO: Add the observed data {x, f, v} to your model.
-        raise NotImplementedError
-
-    def get_solution(self):
-        """
-        Return x_opt that is believed to be the maximizer of f.
-
-        Returns
-        -------
-        solution: float
-            the optimal solution of the problem
-        """
-        # TODO: Return your predicted safe optimum of f.
-        raise NotImplementedError
-
-    def plot(self, plot_recommendation: bool = True):
-        """Plot objective and constraint posterior for debugging (OPTIONAL).
-
-        Parameters
-        ----------
-        plot_recommendation: bool
-            Plots the recommended point if True.
-        """
-        pass
+        # Policy update
+        policy_loss = self.calculate_policy_loss(s_batch)
+        self.run_gradient_update_step(self.actor, policy_loss)
+        # TODO: Implement Policy update here
 
 
-# ---
-# TOY PROBLEM. To check your code works as expected (ignored by checker).
-# ---
+# This main function is provided here to enable some basic testing. 
+# ANY changes here WON'T take any effect while grading.
+if __name__ == '__main__':
 
-def check_in_domain(x: float):
-    """Validate input"""
-    x = np.atleast_2d(x)
-    return np.all(x >= DOMAIN[None, :, 0]) and np.all(x <= DOMAIN[None, :, 1])
+    TRAIN_EPISODES = 50
+    TEST_EPISODES = 300
 
+    # You may set the save_video param to output the video of one of the evalution episodes, or 
+    # you can disable console printing during training and testing by setting verbose to False.
+    save_video = False
+    verbose = True
 
-def f(x: float):
-    """Dummy logP objective"""
-    mid_point = DOMAIN[:, 0] + 0.5 * (DOMAIN[:, 1] - DOMAIN[:, 0])
-    return - np.linalg.norm(x - mid_point, 2)
+    agent = Agent()
+    env = get_env(g=10.0, train=True)
 
+    for EP in range(TRAIN_EPISODES):
+        run_episode(env, agent, None, verbose, train=True)
 
-def v(x: float):
-    """Dummy SA"""
-    return 2.0
+    if verbose:
+        print('\n')
 
+    test_returns = []
+    env = get_env(g=10.0, train=False)
 
-def get_initial_safe_point():
-    """Return initial safe point"""
-    x_domain = np.linspace(*DOMAIN[0], 4000)[:, None]
-    c_val = np.vectorize(v)(x_domain)
-    x_valid = x_domain[c_val < SAFETY_THRESHOLD]
-    np.random.seed(0)
-    np.random.shuffle(x_valid)
-    x_init = x_valid[0]
+    #if save_video:
+    #    video_rec = VideoRecorder(env, "pendulum_episode.mp4")
+    
+    for EP in range(TEST_EPISODES):
+        rec = video_rec if (save_video and EP == TEST_EPISODES - 1) else None
+        with torch.no_grad():
+            episode_return = run_episode(env, agent, rec, verbose, train=False)
+        test_returns.append(episode_return)
 
-    return x_init
+    avg_test_return = np.mean(np.array(test_returns))
 
+    print("\n AVG_TEST_RETURN:{:.1f} \n".format(avg_test_return))
 
-def main():
-    """FOR ILLUSTRATION / TESTING ONLY (NOT CALLED BY CHECKER)."""
-    # Init problem
-    agent = BO_algo()
-
-    # Add initial safe point
-    x_init = get_initial_safe_point()
-    obj_val = f(x_init)
-    cost_val = v(x_init)
-    agent.add_data_point(x_init, obj_val, cost_val)
-
-    # Loop until budget is exhausted
-    for j in range(20):
-        # Get next recommendation
-        x = agent.next_recommendation()
-
-        # Check for valid shape
-        assert x.shape == (1, DOMAIN.shape[0]), \
-            f"The function next recommendation must return a numpy array of " \
-            f"shape (1, {DOMAIN.shape[0]})"
-
-        # Obtain objective and constraint observation
-        obj_val = f(x) + np.randn()
-        cost_val = v(x) + np.randn()
-        agent.add_data_point(x, obj_val, cost_val)
-
-    # Validate solution
-    solution = agent.get_solution()
-    assert check_in_domain(solution), \
-        f'The function get solution must return a point within the' \
-        f'DOMAIN, {solution} returned instead'
-
-    # Compute regret
-    regret = (0 - f(solution))
-
-    print(f'Optimal value: 0\nProposed solution {solution}\nSolution value '
-          f'{f(solution)}\nRegret {regret}\nUnsafe-evals TODO\n')
-
-
-if __name__ == "__main__":
-    main()
-'''
+    if save_video:
+        video_rec.close()
