@@ -4,12 +4,12 @@ from torch.distributions import Normal
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-
+import sys
+sys.path.append('C:/Users/andje/miniconda3/envs/py11/Lib/site-packages')
 from gym.wrappers.monitoring.video_recorder import VideoRecorder
 import warnings
 from typing import Union
 from utils import ReplayBuffer, get_env, run_episode
-torch.manual_seed(2)
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 warnings.filterwarnings("ignore", category=UserWarning)
@@ -179,9 +179,9 @@ class Agent:
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         print("Using device: {}".format(self.device))
         self.memory = ReplayBuffer(self.min_buffer_size, self.max_buffer_size, self.device)
-        self.scale = 10 # for 10 it was -390.2
+        self.scale = 12
         self.gamma = 0.98
-        self.alpha = 0.2
+        self.alpha = 0.1
         self.tau = 0.01
         self.target_update_interval = 1
         
@@ -303,14 +303,14 @@ class Agent:
 
         # Training Value Function
         predicted_new_q_value = torch.min(self.soft_q_net1.critic_network.forward(torch.cat([s_batch, new_action], 1),),self.soft_q_net2.critic_network.forward(torch.cat([s_batch, new_action], 1),))
-        target_value_func = predicted_new_q_value - log_prob
+        target_value_func = predicted_new_q_value - self.alpha * log_prob
         value_loss = value_criterion(predicted_value, target_value_func.detach())
         value_optimizer.zero_grad()
         value_loss.backward()
         value_optimizer.step()
 
         # Training Policy Function
-        policy_loss = (log_prob - predicted_new_q_value).mean()
+        policy_loss = (self.alpha*log_prob - predicted_new_q_value).mean()
         policy_optimizer.zero_grad()
         policy_loss.backward()
         policy_optimizer.step()
