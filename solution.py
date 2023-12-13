@@ -4,8 +4,6 @@ from torch.distributions import Normal
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-import sys
-sys.path.append('C:/Users/andje/miniconda3/envs/py11/Lib/site-packages')
 from gym.wrappers.monitoring.video_recorder import VideoRecorder
 import warnings
 from typing import Union
