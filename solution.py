@@ -112,18 +112,20 @@ class Actor:
         log_std = mu_log_std[:,1]
         log_std = self.clamp_log_std(log_std)
         sigma = torch.exp(log_std)
-        normal = Normal(0, 1)
-        z      = normal.sample(torch.unsqueeze(mu, 1).shape)
+        normal = Normal(torch.unsqueeze(mu, 1), torch.unsqueeze(sigma, 1))
 
         if not deterministic:
-            action = torch.tanh(torch.unsqueeze(mu, 1)+ torch.unsqueeze(sigma, 1)*z.to(self.device))
+            #action = torch.tanh(torch.unsqueeze(mu, 1)+ torch.unsqueeze(sigma, 1)*z.to(self.device))
+            z = normal.rsample()
+            action = torch.tanh(z)
         else:
-            action = torch.tanh(torch.unsqueeze(mu, 1))
-        log_prob = Normal(torch.unsqueeze(mu, 1), torch.unsqueeze(sigma, 1)).log_prob(torch.unsqueeze(mu, 1)+ torch.unsqueeze(sigma, 1)*z.to(self.device)) - torch.log(1 - action.pow(2) + self.reparam_noise)
+            z = torch.unsqueeze(mu, 1)
+            action = torch.tanh(z)
+        log_prob = normal.log_prob(z.to(self.device)) - torch.log(1 - action.pow(2) + self.reparam_noise)
         log_prob = log_prob.sum(dim=-1, keepdim=True)
 
 
-        #print('ACTION ', action.shape)
+        print('mu_log_std ', mu_log_std)
         #print('1 ', state.shape[0], self.action_dim)
         #print('2 ',log_prob.shape)
 
@@ -218,20 +220,10 @@ class Agent:
         """
         # TODO: Implement a function that returns an action from the policy for the state s.
         #action = np.random.uniform(-1, 1, (1,))
-
+        #with torch.no_grad():
         state = torch.FloatTensor(s).unsqueeze(0).to(self.device)
-        '''
-        mu_log_std = self.policy_net.actor_network.forward(state)
-        mean = mu_log_std[:,0]
-        log_std = mu_log_std[:,1]
-        log_std = torch.clamp(log_std, -20, 2)
-        std = torch.exp(log_std)
-        
-        normal = Normal(0, 1)
-        z      = normal.sample(mean.shape).to(self.device)
-        action = torch.tanh(mean + std*z)
-        '''
-        action, _ = self.policy_net.get_action_and_log_prob(state, deterministic = False)  # not train
+        action, _ = self.policy_net.get_action_and_log_prob(state, deterministic = not train)  # False works
+        #print('ACTION ', action)
         action = action.squeeze(0)
         action  = action.detach().cpu().numpy()
         
@@ -313,7 +305,7 @@ class Agent:
 # ANY changes here WON'T take any effect while grading.
 if __name__ == '__main__':
 
-    TRAIN_EPISODES = 50
+    TRAIN_EPISODES = 2
     TEST_EPISODES = 300
 
     # You may set the save_video param to output the video of one of the evalution episodes, or 
