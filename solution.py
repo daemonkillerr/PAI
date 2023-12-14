@@ -4,6 +4,8 @@ from torch.distributions import Normal
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
+import sys
+sys.path.append('C:/Users/andje/miniconda3/envs/py11/Lib/site-packages')
 from gym.wrappers.monitoring.video_recorder import VideoRecorder
 import warnings
 from typing import Union
@@ -75,8 +77,6 @@ class Actor:
         self.LOG_STD_MIN = -20
         self.LOG_STD_MAX = 2
         self.reparam_noise = 1e-6
-        env1 = get_env(g=10.0, train=False)
-        self.action_space = env1.action_space
         self.setup_actor()
 
     def setup_actor(self):
@@ -85,7 +85,7 @@ class Actor:
         '''
         self.actor_network = NeuralNetwork(self.state_dim, self.action_dim * 2, hidden_size=self.hidden_size,
                                             hidden_layers=self.hidden_layers, activation='relu').to(self.device)
-        self.actor_optimizer = optim.Adam(self.actor_network.parameters(), lr=self.actor_lr)
+        self.optimizer = optim.Adam(self.actor_network.parameters(), lr=self.actor_lr)
 
     def clamp_log_std(self, log_std: torch.Tensor) -> torch.Tensor:
         '''
@@ -108,18 +108,24 @@ class Actor:
         :param log_prob: log_probability of the the action.
         '''
         mu_log_std = self.actor_network.forward(state)
-        #print(mu_log_std.shape)
         mu = mu_log_std[:,0]
         log_std = mu_log_std[:,1]
         log_std = self.clamp_log_std(log_std)
         sigma = torch.exp(log_std)
         normal = Normal(0, 1)
         z      = normal.sample(torch.unsqueeze(mu, 1).shape)
-        action = torch.tanh(torch.unsqueeze(mu, 1)+ torch.unsqueeze(sigma, 1)*z.to(self.device))
+
+        if not deterministic:
+            action = torch.tanh(torch.unsqueeze(mu, 1)+ torch.unsqueeze(sigma, 1)*z.to(self.device))
+        else:
+            action = torch.tanh(torch.unsqueeze(mu, 1))
         log_prob = Normal(torch.unsqueeze(mu, 1), torch.unsqueeze(sigma, 1)).log_prob(torch.unsqueeze(mu, 1)+ torch.unsqueeze(sigma, 1)*z.to(self.device)) - torch.log(1 - action.pow(2) + self.reparam_noise)
         log_prob = log_prob.sum(dim=-1, keepdim=True)
+
+
         #print('ACTION ', action.shape)
-        #print(log_prob.shape)
+        #print('1 ', state.shape[0], self.action_dim)
+        #print('2 ',log_prob.shape)
 
         assert action.shape == (state.shape[0], self.action_dim) and \
             log_prob.shape == (state.shape[0], self.action_dim), 'Incorrect shape for action or log_prob.'
@@ -144,7 +150,7 @@ class Critic:
         # class in utils.py. Note that you can have MULTIPLE critic networks in this class.
         self.critic_network = NeuralNetwork(self.state_dim + self.action_dim, 2, hidden_size=self.hidden_size,
                                             hidden_layers=self.hidden_layers, activation='relu').to(self.device)
-        self.critic_optimizer = optim.Adam(self.critic_network.parameters(), lr=self.critic_lr)
+        self.optimizer = optim.Adam(self.critic_network.parameters(), lr=self.critic_lr)
 
 class TrainableParameter:
     '''
@@ -177,24 +183,31 @@ class Agent:
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         print("Using device: {}".format(self.device))
         self.memory = ReplayBuffer(self.min_buffer_size, self.max_buffer_size, self.device)
-        self.scale = 12
-        self.gamma = 0.98
-        self.alpha = 0.1
-        self.tau = 0.01
+        self.scale = 2
+        self.gamma = 0.99
+        self.alpha = 0.2
+        self.tau = 0.005
         self.target_update_interval = 1
+        self.hidden_layers = 2
+        self.hidden_size = 512
+        self.lr = 3e-4
         
         self.setup_agent()
 
     def setup_agent(self):
         # TODO: Setup off-policy agent with policy and critic classes. 
         # Feel free to instantiate any other parameters you feel you might need.   
-        self.policy_net = Actor(hidden_size=512, hidden_layers=2, actor_lr=0.0003, state_dim = self.state_dim, action_dim = self.action_dim, device = self.device)  # policy
-        self.soft_q_net1 = Critic(hidden_size=512, hidden_layers=2, critic_lr=0.0003, state_dim = self.state_dim, action_dim = self.action_dim, device = self.device)  # Q1
-        self.soft_q_net2 = Critic(hidden_size=512, hidden_layers=2, critic_lr=0.0003, state_dim = self.state_dim, action_dim = self.action_dim, device = self.device)  # Q1
-        self.value_net        = NeuralNetwork(self.state_dim, self.action_dim, hidden_size=512,
-                                            hidden_layers=2, activation='relu').to(self.device)
-        self.target_value_net = NeuralNetwork(self.state_dim, self.action_dim, hidden_size=512,
-                                            hidden_layers=2, activation='relu').to(self.device)
+        self.policy_net = Actor(hidden_size=self.hidden_size, hidden_layers=self.hidden_layers, actor_lr=self.lr, state_dim = self.state_dim, action_dim = self.action_dim, device = self.device)  # policy
+        self.critic_1 = Critic(hidden_size=self.hidden_size, hidden_layers=self.hidden_layers, critic_lr=self.lr, state_dim = self.state_dim, action_dim = self.action_dim, device = self.device)  # Q1
+        self.critic_2 = Critic(hidden_size=self.hidden_size, hidden_layers=self.hidden_layers, critic_lr=self.lr, state_dim = self.state_dim, action_dim = self.action_dim, device = self.device)  # Q1
+        self.critic_1_target = Critic(hidden_size=self.hidden_size, hidden_layers=self.hidden_layers, critic_lr=self.lr, state_dim = self.state_dim, action_dim = self.action_dim, device = self.device)  # Q1
+        self.critic_2_target = Critic(hidden_size=self.hidden_size, hidden_layers=self.hidden_layers, critic_lr=self.lr, state_dim = self.state_dim, action_dim = self.action_dim, device = self.device)  # Q1
+        #self.value_net        = NeuralNetwork(self.state_dim, self.action_dim, hidden_size=self.hidden_size,
+        #                                    hidden_layers=self.hidden_layers, activation='relu').to(self.device)
+        #self.value_net.optimizer = optim.Adam(self.value_net.parameters(), lr=self.lr)
+        #self.target_value_net = NeuralNetwork(self.state_dim, self.action_dim, hidden_size=self.hidden_size,
+        #                                    hidden_layers=self.hidden_layers, activation='relu').to(self.device)
+        #self.target_value_net.optimizer = optim.Adam(self.target_value_net.parameters(), lr=self.lr)
 
     def get_action(self, s: np.ndarray, train: bool) -> np.ndarray:
         """
@@ -207,6 +220,7 @@ class Agent:
         #action = np.random.uniform(-1, 1, (1,))
 
         state = torch.FloatTensor(s).unsqueeze(0).to(self.device)
+        '''
         mu_log_std = self.policy_net.actor_network.forward(state)
         mean = mu_log_std[:,0]
         log_std = mu_log_std[:,1]
@@ -216,7 +230,9 @@ class Agent:
         normal = Normal(0, 1)
         z      = normal.sample(mean.shape).to(self.device)
         action = torch.tanh(mean + std*z)
-        
+        '''
+        action, _ = self.policy_net.get_action_and_log_prob(state, deterministic = False)  # not train
+        action = action.squeeze(0)
         action  = action.detach().cpu().numpy()
         
         assert action.shape == (1,), 'Incorrect action shape.'
@@ -267,57 +283,31 @@ class Agent:
         batch = self.memory.sample(self.batch_size)
         s_batch, a_batch, r_batch, s_prime_batch = batch
         
-        value_criterion  = nn.MSELoss()
-        soft_q_criterion1 = nn.MSELoss()
-        soft_q_criterion2 = nn.MSELoss()
-        
-        value_lr  = 3e-4
-        soft_q_lr = 3e-4
-        policy_lr = 3e-4 
+        with torch.no_grad():
+            next_state_action, next_state_log_pi = self.policy_net.get_action_and_log_prob(s_prime_batch, deterministic=False)
+            qf1_next_target = self.critic_1_target.critic_network.forward(torch.cat([s_prime_batch, next_state_action], 1))
+            qf2_next_target = self.critic_2_target.critic_network.forward(torch.cat([s_prime_batch, next_state_action], 1))
+            min_qf_next_target = torch.min(qf1_next_target, qf2_next_target) - self.alpha * next_state_log_pi
+            next_q_value = r_batch + self.gamma * (min_qf_next_target)
+        qf1 = self.critic_1.critic_network.forward(torch.cat([s_batch, a_batch], 1))
+        qf2 = self.critic_2.critic_network.forward(torch.cat([s_batch, a_batch], 1)) 
+        qf1_loss = F.mse_loss(qf1, next_q_value)  
+        qf2_loss = F.mse_loss(qf2, next_q_value) 
+        self.run_gradient_update_step(self.critic_1, qf1_loss)
+        self.run_gradient_update_step(self.critic_2, qf2_loss)
 
-        value_optimizer  = optim.Adam(self.value_net.parameters(), lr=value_lr)
-        soft_q_optimizer1 = optim.Adam(self.soft_q_net1.critic_network.parameters(), lr=soft_q_lr)
-        soft_q_optimizer2 = optim.Adam(self.soft_q_net2.critic_network.parameters(), lr=soft_q_lr)
-        policy_optimizer = optim.Adam(self.policy_net.actor_network.parameters(), lr=policy_lr)
+        pi, log_pi = self.policy_net.get_action_and_log_prob(s_batch, deterministic=False)
 
-        predicted_q_value1 = self.soft_q_net1.critic_network.forward(torch.cat([s_batch, a_batch], 1))
-        predicted_q_value2 = self.soft_q_net2.critic_network.forward(torch.cat([s_batch, a_batch], 1))
-        predicted_value    = self.value_net.forward(s_batch)
-        new_action, log_prob = self.policy_net.get_action_and_log_prob(s_batch, deterministic=False)
+        qf1_pi = self.critic_1.critic_network.forward(torch.cat([s_batch, pi], 1))
+        qf2_pi = self.critic_2.critic_network.forward(torch.cat([s_batch, pi], 1))
+        min_qf_pi = torch.min(qf1_pi, qf2_pi)
 
-        
-        
-        # Training Q Function
-        target_value = self.target_value_net.forward(s_prime_batch)
-        target_q_value = self.scale * r_batch + self.gamma * target_value
-        q_value_loss1 = soft_q_criterion1(predicted_q_value1, target_q_value.detach())
-        q_value_loss2 = soft_q_criterion2(predicted_q_value2, target_q_value.detach())
-        soft_q_optimizer1.zero_grad()
-        q_value_loss1.backward()
-        soft_q_optimizer1.step()
-        soft_q_optimizer2.zero_grad()
-        q_value_loss2.backward()
-        soft_q_optimizer2.step()   
+        policy_loss = ((self.alpha * log_pi) - min_qf_pi).mean()
 
-        # Training Value Function
-        predicted_new_q_value = torch.min(self.soft_q_net1.critic_network.forward(torch.cat([s_batch, new_action], 1),),self.soft_q_net2.critic_network.forward(torch.cat([s_batch, new_action], 1),))
-        target_value_func = predicted_new_q_value - self.alpha * log_prob
-        value_loss = value_criterion(predicted_value, target_value_func.detach())
-        value_optimizer.zero_grad()
-        value_loss.backward()
-        value_optimizer.step()
+        self.run_gradient_update_step(self.policy_net, policy_loss)
 
-        # Training Policy Function
-        policy_loss = (self.alpha*log_prob - predicted_new_q_value).mean()
-        policy_optimizer.zero_grad()
-        policy_loss.backward()
-        policy_optimizer.step()
-        
-        for target_param, param in zip(self.target_value_net.parameters(), self.value_net.parameters()):
-            target_param.data.copy_(
-                target_param.data * (1.0 - self.tau) + param.data * self.tau
-            )
-
+        self.critic_target_update(self.critic_1.critic_network, self.critic_1_target.critic_network, self.tau, soft_update=True)
+        self.critic_target_update(self.critic_2.critic_network, self.critic_2_target.critic_network, self.tau, soft_update=True)
 
 # This main function is provided here to enable some basic testing. 
 # ANY changes here WON'T take any effect while grading.
