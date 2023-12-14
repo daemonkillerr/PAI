@@ -10,6 +10,7 @@ from gym.wrappers.monitoring.video_recorder import VideoRecorder
 import warnings
 from typing import Union
 from utils import ReplayBuffer, get_env, run_episode
+import copy
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 warnings.filterwarnings("ignore", category=UserWarning)
@@ -53,8 +54,6 @@ class NeuralNetwork(nn.Module):
 
         # Output layer
         out_layer = nn.Linear(self.hidden_size, self.output_dim)
-        out_layer.weight.data.uniform_(-self.init_w, self.init_w)
-        out_layer.bias.data.uniform_(-self.init_w, self.init_w)
         layers.append(out_layer)
 
         self.model = nn.Sequential(*layers)
@@ -115,7 +114,6 @@ class Actor:
         normal = Normal(torch.unsqueeze(mu, 1), torch.unsqueeze(sigma, 1))
 
         if not deterministic:
-            #action = torch.tanh(torch.unsqueeze(mu, 1)+ torch.unsqueeze(sigma, 1)*z.to(self.device))
             z = normal.rsample()
             action = torch.tanh(z)
         else:
@@ -123,11 +121,6 @@ class Actor:
             action = torch.tanh(z)
         log_prob = normal.log_prob(z.to(self.device)) - torch.log(1 - action.pow(2) + self.reparam_noise)
         log_prob = log_prob.sum(dim=-1, keepdim=True)
-
-
-        print('mu_log_std ', mu_log_std)
-        #print('1 ', state.shape[0], self.action_dim)
-        #print('2 ',log_prob.shape)
 
         assert action.shape == (state.shape[0], self.action_dim) and \
             log_prob.shape == (state.shape[0], self.action_dim), 'Incorrect shape for action or log_prob.'
@@ -202,14 +195,8 @@ class Agent:
         self.policy_net = Actor(hidden_size=self.hidden_size, hidden_layers=self.hidden_layers, actor_lr=self.lr, state_dim = self.state_dim, action_dim = self.action_dim, device = self.device)  # policy
         self.critic_1 = Critic(hidden_size=self.hidden_size, hidden_layers=self.hidden_layers, critic_lr=self.lr, state_dim = self.state_dim, action_dim = self.action_dim, device = self.device)  # Q1
         self.critic_2 = Critic(hidden_size=self.hidden_size, hidden_layers=self.hidden_layers, critic_lr=self.lr, state_dim = self.state_dim, action_dim = self.action_dim, device = self.device)  # Q1
-        self.critic_1_target = Critic(hidden_size=self.hidden_size, hidden_layers=self.hidden_layers, critic_lr=self.lr, state_dim = self.state_dim, action_dim = self.action_dim, device = self.device)  # Q1
-        self.critic_2_target = Critic(hidden_size=self.hidden_size, hidden_layers=self.hidden_layers, critic_lr=self.lr, state_dim = self.state_dim, action_dim = self.action_dim, device = self.device)  # Q1
-        #self.value_net        = NeuralNetwork(self.state_dim, self.action_dim, hidden_size=self.hidden_size,
-        #                                    hidden_layers=self.hidden_layers, activation='relu').to(self.device)
-        #self.value_net.optimizer = optim.Adam(self.value_net.parameters(), lr=self.lr)
-        #self.target_value_net = NeuralNetwork(self.state_dim, self.action_dim, hidden_size=self.hidden_size,
-        #                                    hidden_layers=self.hidden_layers, activation='relu').to(self.device)
-        #self.target_value_net.optimizer = optim.Adam(self.target_value_net.parameters(), lr=self.lr)
+        self.critic_1_target = copy.deepcopy(self.critic_1)
+        self.critic_2_target = copy.deepcopy(self.critic_2)
 
     def get_action(self, s: np.ndarray, train: bool) -> np.ndarray:
         """
@@ -220,11 +207,10 @@ class Agent:
         """
         # TODO: Implement a function that returns an action from the policy for the state s.
         #action = np.random.uniform(-1, 1, (1,))
-        #with torch.no_grad():
-        state = torch.FloatTensor(s).unsqueeze(0).to(self.device)
-        action, _ = self.policy_net.get_action_and_log_prob(state, deterministic = not train)  # False works
-        #print('ACTION ', action)
-        action = action.squeeze(0)
+        with torch.no_grad():
+            state = torch.FloatTensor(s).unsqueeze(0).to(self.device)
+            action, _ = self.policy_net.get_action_and_log_prob(state, deterministic = not train)  # False works
+            action = action.squeeze(0)
         action  = action.detach().cpu().numpy()
         
         assert action.shape == (1,), 'Incorrect action shape.'
@@ -305,7 +291,7 @@ class Agent:
 # ANY changes here WON'T take any effect while grading.
 if __name__ == '__main__':
 
-    TRAIN_EPISODES = 2
+    TRAIN_EPISODES = 50
     TEST_EPISODES = 300
 
     # You may set the save_video param to output the video of one of the evalution episodes, or 
