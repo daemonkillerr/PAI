@@ -4,8 +4,6 @@ from torch.distributions import Normal
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-import sys
-sys.path.append('C:/Users/andje/miniconda3/envs/py11/Lib/site-packages')
 from gym.wrappers.monitoring.video_recorder import VideoRecorder
 import warnings
 from typing import Union
@@ -35,7 +33,6 @@ class NeuralNetwork(nn.Module):
         self.init_w = 3e-3
         layers = []
 
-        # Input layer
         layers.append(nn.Linear(self.input_dim, self.hidden_size))
         if self.activation == 'relu':
             layers.append(nn.ReLU())
@@ -44,7 +41,6 @@ class NeuralNetwork(nn.Module):
         else:
             raise NotImplementedError(f"Activation {activation} not implemented.")
 
-        # Hidden layers
         for _ in range(self.hidden_layers - 1):
             layers.append(nn.Linear(self.hidden_size, self.hidden_size))
             if self.activation == 'relu':
@@ -52,10 +48,10 @@ class NeuralNetwork(nn.Module):
             elif self.activation == 'tanh':
                 layers.append(nn.Tanh())
 
-        # Output layer
         out_layer = nn.Linear(self.hidden_size, self.output_dim)
+        out_layer.weight.data.uniform_(-self.init_w, self.init_w)
+        out_layer.bias.data.uniform_(-self.init_w, self.init_w)
         layers.append(out_layer)
-
         self.model = nn.Sequential(*layers)
 
     def forward(self, s: torch.Tensor) -> torch.Tensor:
@@ -114,14 +110,12 @@ class Actor:
         normal = Normal(torch.unsqueeze(mu, 1), torch.unsqueeze(sigma, 1))
 
         if not deterministic:
-            z = normal.rsample()
-            action = torch.tanh(z)
+            action_0 = normal.rsample()
         else:
-            z = torch.unsqueeze(mu, 1)
-            action = torch.tanh(z)
-        log_prob = normal.log_prob(z.to(self.device)) - torch.log(1 - action.pow(2) + self.reparam_noise)
+            action_0 = torch.unsqueeze(mu, 1)
+        action = torch.tanh(action_0)
+        log_prob = normal.log_prob(action_0.to(self.device)) - torch.log(1 - action.pow(2) + self.reparam_noise)
         log_prob = log_prob.sum(dim=-1, keepdim=True)
-
         assert action.shape == (state.shape[0], self.action_dim) and \
             log_prob.shape == (state.shape[0], self.action_dim), 'Incorrect shape for action or log_prob.'
         return action, log_prob
@@ -178,13 +172,12 @@ class Agent:
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         print("Using device: {}".format(self.device))
         self.memory = ReplayBuffer(self.min_buffer_size, self.max_buffer_size, self.device)
-        self.scale = 2
         self.gamma = 0.99
         self.alpha = 0.2
         self.tau = 0.005
         self.target_update_interval = 1
-        self.hidden_layers = 2
-        self.hidden_size = 512
+        self.hidden_layers = 3
+        self.hidden_size = 256
         self.lr = 3e-4
         
         self.setup_agent()
@@ -192,9 +185,9 @@ class Agent:
     def setup_agent(self):
         # TODO: Setup off-policy agent with policy and critic classes. 
         # Feel free to instantiate any other parameters you feel you might need.   
-        self.policy_net = Actor(hidden_size=self.hidden_size, hidden_layers=self.hidden_layers, actor_lr=self.lr, state_dim = self.state_dim, action_dim = self.action_dim, device = self.device)  # policy
-        self.critic_1 = Critic(hidden_size=self.hidden_size, hidden_layers=self.hidden_layers, critic_lr=self.lr, state_dim = self.state_dim, action_dim = self.action_dim, device = self.device)  # Q1
-        self.critic_2 = Critic(hidden_size=self.hidden_size, hidden_layers=self.hidden_layers, critic_lr=self.lr, state_dim = self.state_dim, action_dim = self.action_dim, device = self.device)  # Q1
+        self.policy_net = Actor(hidden_size=self.hidden_size, hidden_layers=self.hidden_layers, actor_lr=self.lr, state_dim = self.state_dim, action_dim = self.action_dim, device = self.device)
+        self.critic_1 = Critic(hidden_size=self.hidden_size, hidden_layers=self.hidden_layers, critic_lr=self.lr, state_dim = self.state_dim, action_dim = self.action_dim, device = self.device) 
+        self.critic_2 = Critic(hidden_size=self.hidden_size, hidden_layers=self.hidden_layers, critic_lr=self.lr, state_dim = self.state_dim, action_dim = self.action_dim, device = self.device) 
         self.critic_1_target = copy.deepcopy(self.critic_1)
         self.critic_2_target = copy.deepcopy(self.critic_2)
 
@@ -209,7 +202,7 @@ class Agent:
         #action = np.random.uniform(-1, 1, (1,))
         with torch.no_grad():
             state = torch.FloatTensor(s).unsqueeze(0).to(self.device)
-            action, _ = self.policy_net.get_action_and_log_prob(state, deterministic = not train)  # False works
+            action, _ = self.policy_net.get_action_and_log_prob(state, deterministic = not train)  
             action = action.squeeze(0)
         action  = action.detach().cpu().numpy()
         
@@ -262,10 +255,10 @@ class Agent:
         s_batch, a_batch, r_batch, s_prime_batch = batch
         
         with torch.no_grad():
-            next_state_action, next_state_log_pi = self.policy_net.get_action_and_log_prob(s_prime_batch, deterministic=False)
-            qf1_next_target = self.critic_1_target.critic_network.forward(torch.cat([s_prime_batch, next_state_action], 1))
-            qf2_next_target = self.critic_2_target.critic_network.forward(torch.cat([s_prime_batch, next_state_action], 1))
-            min_qf_next_target = torch.min(qf1_next_target, qf2_next_target) - self.alpha * next_state_log_pi
+            next_action, next_log_prob = self.policy_net.get_action_and_log_prob(s_prime_batch, deterministic=False)
+            qf1_next_target = self.critic_1_target.critic_network.forward(torch.cat([s_prime_batch, next_action], 1))
+            qf2_next_target = self.critic_2_target.critic_network.forward(torch.cat([s_prime_batch, next_action], 1))
+            min_qf_next_target = torch.min(qf1_next_target, qf2_next_target) - self.alpha * next_log_prob
             next_q_value = r_batch + self.gamma * (min_qf_next_target)
         qf1 = self.critic_1.critic_network.forward(torch.cat([s_batch, a_batch], 1))
         qf2 = self.critic_2.critic_network.forward(torch.cat([s_batch, a_batch], 1)) 
@@ -274,13 +267,13 @@ class Agent:
         self.run_gradient_update_step(self.critic_1, qf1_loss)
         self.run_gradient_update_step(self.critic_2, qf2_loss)
 
-        pi, log_pi = self.policy_net.get_action_and_log_prob(s_batch, deterministic=False)
+        next_action_pi, next_log_prob_pi = self.policy_net.get_action_and_log_prob(s_batch, deterministic=False)
 
-        qf1_pi = self.critic_1.critic_network.forward(torch.cat([s_batch, pi], 1))
-        qf2_pi = self.critic_2.critic_network.forward(torch.cat([s_batch, pi], 1))
-        min_qf_pi = torch.min(qf1_pi, qf2_pi)
+        qf1_pi = self.critic_1.critic_network.forward(torch.cat([s_batch, next_action_pi], 1))
+        qf2_pi = self.critic_2.critic_network.forward(torch.cat([s_batch, next_action_pi], 1))
+        min_qf_policy = torch.min(qf1_pi, qf2_pi)
 
-        policy_loss = ((self.alpha * log_pi) - min_qf_pi).mean()
+        policy_loss = ((self.alpha * next_log_prob_pi) - min_qf_policy).mean()
 
         self.run_gradient_update_step(self.policy_net, policy_loss)
 
@@ -291,6 +284,7 @@ class Agent:
 # ANY changes here WON'T take any effect while grading.
 if __name__ == '__main__':
 
+    
     TRAIN_EPISODES = 50
     TEST_EPISODES = 300
 
